@@ -6,6 +6,7 @@ const LEGACY_KEY = "the-black-ledger.events.v1";
 const api = (sessionId = "") => `/api/sessions${sessionId ? `/${encodeURIComponent(sessionId)}` : ""}`;
 const updates = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("the-black-ledger-sync-v1");
 let appendWarnings = [];
+let accessContext = { role: "organizer", memberId: null };
 
 async function request(path, options) {
   const accessToken = localStorage.getItem(TOKEN_KEY);
@@ -24,9 +25,16 @@ export async function loadLedger() {
   }
   let sessionId = localStorage.getItem(SESSION_KEY);
   if (sessionId) {
-    try { return parseEventLog((await request(api(sessionId))).events); }
+    try {
+      const response = await request(api(sessionId));
+      accessContext = response.access ?? { role: "organizer", memberId: null };
+      return parseEventLog(response.events);
+    }
     catch (error) {
-      if (!String(error.message).includes("Session not found") && !String(error.message).includes("access token")) throw error;
+      const message = String(error.message);
+      const missingSession = message.includes("Session not found");
+      const tokenlessLegacySession = message.includes("valid session access token") && localStorage.getItem(TOKEN_KEY) === null;
+      if (!missingSession && !tokenlessLegacySession) throw error;
       localStorage.removeItem(SESSION_KEY);
       localStorage.removeItem(TOKEN_KEY);
       sessionId = null;
@@ -37,6 +45,7 @@ export async function loadLedger() {
   const created = await request(api(), { method: "POST", body: JSON.stringify({ name: "The Black Ledger", baseCurrency: "USD" }) });
   localStorage.setItem(SESSION_KEY, created.sessionId);
   localStorage.setItem(TOKEN_KEY, created.accessToken);
+  accessContext = { role: "organizer", memberId: null };
   let events = [created.event];
   for (const event of legacy) {
     const result = await request(`${api(created.sessionId)}/events`, { method: "POST", headers: { "Idempotency-Key": `migration-${event.id}` }, body: JSON.stringify({ event }) });
@@ -44,6 +53,8 @@ export async function loadLedger() {
   }
   return parseEventLog(events);
 }
+
+export function getAccessContext() { return { ...accessContext }; }
 
 export async function appendEvent(currentEvents, type, fields) {
   const sessionId = localStorage.getItem(SESSION_KEY);

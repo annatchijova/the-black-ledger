@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, session_id TEXT NOT NU
 CREATE TABLE IF NOT EXISTS session_tokens (token_hash TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), role TEXT NOT NULL, member_id TEXT, created_at TEXT NOT NULL, revoked_at TEXT);
 CREATE TABLE IF NOT EXISTS paypal_orders (order_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, status TEXT NOT NULL, capture_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS session_patterns (session_id TEXT PRIMARY KEY REFERENCES sessions(id), pattern TEXT NOT NULL, recorded_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS evidence_session_digest ON evidence(session_id, sha256);
 `);
 
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml", ".json": "application/json" };
@@ -262,7 +263,7 @@ async function route(req, res) {
       if (organizerOnly.has(event?.type) && access.role !== "organizer") return send(res, 403, { error: "This ledger action is restricted to its organizer." });
       const actor = access.member_id;
       if (actor && before.members.find((member) => member.id === actor)?.status !== "active") return send(res, 403, { error: "Departed or removed participants cannot change this ledger." });
-      if (actor && event?.type === "EXPENSE_RECORDED" && event.paidByMemberId !== actor && event.payerId !== actor) return send(res, 403, { error: "A participant can only enter an expense they paid." });
+      if (actor && event?.type === "EXPENSE_RECORDED" && (event.paidByMemberId ?? event.payerId) !== actor) return send(res, 403, { error: "A participant can only enter an expense they paid." });
       if (actor && event?.type === "MEMBER_CONFIRMED_EXPENSE" && event.memberId !== actor) return send(res, 403, { error: "A participant can only confirm their own expense allocation." });
       if (actor && event?.type === "EXPENSE_DISCREPANCY_RECORDED" && event.raisedByMemberId !== actor) return send(res, 403, { error: "A participant can only raise a discrepancy under their own name." });
       if (actor && event?.type === "SETTLEMENT_ASSERTED" && event.fromMemberId !== actor) return send(res, 403, { error: "A participant can only claim a payment they made." });
@@ -338,11 +339,28 @@ async function route(req, res) {
       if (typeof body.dataBase64 !== "string" || body.dataBase64.length > 10_700_000) return send(res, 413, { error: "Evidence exceeds the 8 MB limit." });
       const content = Buffer.from(body.dataBase64, "base64");
       if (!content.length || content.length > 8_000_000 || content.toString("base64").replace(/=+$/, "") !== body.dataBase64.replace(/=+$/, "")) return send(res, 400, { error: "Evidence encoding is invalid or exceeds the 8 MB limit." });
+      const digest = sha(content); const mediaType = String(body.mediaType ?? "application/octet-stream").slice(0, 80);
+      const duplicate = db.prepare("SELECT id, media_type, byte_length FROM evidence WHERE session_id = ? AND sha256 = ?").get(sessionId, digest);
+      if (duplicate) {
+        if (duplicate.media_type !== mediaType) return send(res, 409, { error: "Identical evidence bytes were already attached under a different media type." });
+        const existingEvent = getEvents(sessionId).events.find((event) => event.type === "EVIDENCE_ATTACHED" && event.evidenceId === duplicate.id);
+        if (existingEvent) return send(res, 200, { id: duplicate.id, sha256: digest, mediaType, byteLength: duplicate.byte_length, event: existingEvent, duplicate: true });
+        const event = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "EVIDENCE_ATTACHED", evidenceId: duplicate.id, contentHash: digest, mediaType, byteLength: duplicate.byte_length };
+        const attached = append(sessionId, event, `evidence-${duplicate.id}`);
+        return send(res, 201, { id: duplicate.id, sha256: digest, mediaType, byteLength: duplicate.byte_length, event: attached.event, headHash: attached.headHash });
+      }
       const currentEvidenceBytes = db.prepare("SELECT COALESCE(SUM(byte_length), 0) AS total FROM evidence WHERE session_id = ?").get(sessionId).total;
       if (currentEvidenceBytes + content.length > 50_000_000) return send(res, 413, { error: "A ledger can store up to 50 MB of evidence." });
-      const id = randomUUID().replaceAll("-", ""); const digest = sha(content); const mediaType = String(body.mediaType ?? "application/octet-stream").slice(0, 80);
+      const id = randomUUID().replaceAll("-", "");
       db.prepare("INSERT INTO evidence(id, session_id, sha256, media_type, byte_length, content) VALUES (?, ?, ?, ?, ?, ?)").run(id, sessionId, digest, mediaType, content.length, content);
-      return send(res, 201, { id, sha256: digest, mediaType, byteLength: content.length });
+      try {
+        const event = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "EVIDENCE_ATTACHED", evidenceId: id, contentHash: digest, mediaType, byteLength: content.length };
+        const attached = append(sessionId, event, `evidence-${id}`);
+        return send(res, 201, { id, sha256: digest, mediaType, byteLength: content.length, event: attached.event, headHash: attached.headHash });
+      } catch (error) {
+        db.prepare("DELETE FROM evidence WHERE id = ? AND session_id = ?").run(id, sessionId);
+        throw error;
+      }
     }
   }
   if (req.method !== "GET" || url.pathname.startsWith("/api/")) return send(res, 404, { error: "Route not found." });

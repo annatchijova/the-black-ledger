@@ -20,6 +20,7 @@ Open `http://127.0.0.1:4173`. Copy `.env.example` to `.env` to configure integra
 - Deterministic net-settlement suggestions, hypothetical event simulation, possible-duplicate suggestions, and explicit closure blockers.
 - Evidence upload with an 8 MB bound and SHA-256 digest.
 - Session access tokens with organizer, participant, and read-only witness roles; surprise-gift descriptions are hidden from the recipient's event view.
+- Participant expense and payment actions are constrained to the participant's own identity; only the payment recipient can confirm receipt.
 - Optional server-side PayPal Sandbox order and capture endpoints. Checkout is restricted to an outstanding obligation owed to the configured merchant participant. The server derives amounts and posts a settlement only after a completed capture.
 - Optional receipt proposals from the OpenAI Responses API. The returned extraction is a proposal and requires manual review.
 
@@ -29,11 +30,12 @@ Open `http://127.0.0.1:4173`. Copy `.env.example` to `.env` to configure integra
 - `POST /api/sessions` with `{ "name": "Weekend", "baseCurrency": "USD" }`
 - `GET /api/sessions/:sessionId` with the returned organizer token as a Bearer token
 - `POST /api/sessions/:sessionId/invitations` with `{ "name": "Alex", "role": "member" }`; returns a private invite path and access token
-- `POST /api/sessions/:sessionId/carry-debt` to carry one full, verified obligation from another same-currency session without duplicating it
+- `POST /api/sessions/:sessionId/carry-debt` with `Idempotency-Key` and `x-origin-token` to carry one full, verified obligation atomically from another same-currency session
 - `POST /api/sessions/:sessionId/events` with a Bearer token, an `Idempotency-Key` header, and `{ "event": { ... } }`
 - `POST /api/sessions/:sessionId/evidence` with `{ "mediaType": "image/jpeg", "dataBase64": "..." }`
 - `GET /api/sessions/:sessionId/export` for the event log, event proofs, and attached evidence
 - `POST /api/sessions/:sessionId/analysis/receipt` with `{ "mediaType": "image/jpeg", "dataBase64": "..." }`
+- `POST /api/sessions/:sessionId/analysis/scenario` with `{ "prompt": "..." }`; AI proposes events and deterministic simulation computes balances without writing
 - `POST /api/sessions/:sessionId/simulate` with `{ "proposedEvents": [ ... ] }`; this endpoint never writes events
 - `POST /api/sessions/:sessionId/payments` with `{ "fromMemberId": "...", "toMemberId": "..." }` to create an order for an existing obligation
 - `POST /api/sessions/:sessionId/payments/:orderId/capture` after buyer approval

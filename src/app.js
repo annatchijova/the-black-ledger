@@ -1,6 +1,6 @@
 import { deriveLedger, formatMoney, parseAmountToCents, settleUp } from "./domain.js";
 import { deriveNarrativeEvents } from "./domain/narrative.js";
-import { appendEvent, exportLedger, loadLedger, takeAppendWarnings } from "./store.js";
+import { appendEvent, exportLedger, loadLedger, takeAppendWarnings, getAccessContext } from "./store.js";
 
 const view = document.querySelector("#view");
 const storageError = document.querySelector("#storage-error");
@@ -8,6 +8,7 @@ const toast = document.querySelector("#toast");
 let events;
 let route = location.hash.slice(1) || "home";
 let toastTimer;
+let pendingEvidenceIds = [];
 const routes = new Set(["home", "members", "expenses", "history", "payments", "verdict"]);
 const h = (text) => String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const eventDate = (iso) => new Date(iso).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
@@ -25,10 +26,10 @@ function showToast(message) {
 }
 
 async function commit(type, fields, successMessage) {
-  try { events = await appendEvent(events, type, fields); const warnings = takeAppendWarnings(); render(); showToast(warnings.length ? `Possible duplicate: ${warnings.map((item) => item.reason).join("; ")}. Check the record; nothing was removed.` : successMessage); }
+  try { events = await appendEvent(events, type, fields); const warnings = takeAppendWarnings(); render(); showToast(warnings.length ? `Possible duplicate: ${warnings.map((item) => item.reason).join("; ")}. Check the record; nothing was removed.` : successMessage); return true; }
   catch (error) {
     try { events = await loadLedger(); render(); } catch (loadError) { storageError.hidden = false; storageError.textContent = loadError.message; document.querySelector("#application").hidden = true; }
-    showToast(error.message);
+    showToast(error.message); return false;
   }
 }
 
@@ -41,6 +42,8 @@ function statusPill(current) {
 }
 
 function homePage(current) {
+  const access = getAccessContext();
+  const readOnly = access.role === "witness";
   const balanceStatus = current.members.length === 0 ? "Awaiting entries" : [...current.balances.values()].every((value) => value === 0) ? "Balanced" : "Unsettled";
   const narrative = deriveNarrativeEvents(current).at(-1);
   return `${header("The Black Ledger", "A record of what was shared, and what remains.", "A PRIVATE ACCOUNT")}
@@ -48,7 +51,7 @@ function homePage(current) {
     <section class="stat-grid"><article class="stat-card"><span>BOUND TO THIS JOURNEY</span><strong>${current.members.length}</strong><small>participants</small></article><article class="stat-card"><span>RECORDED EXPENDITURE</span><strong>${formatMoney(current.totalExpenses)}</strong><small>${current.expenses.length} expense${current.expenses.length === 1 ? "" : "s"}</small></article><article class="stat-card"><span>ACCOUNT CONDITION</span><strong class="condition ${balanceStatus === "Balanced" ? "good" : "pending"}">${balanceStatus}</strong><small>${current.settlements.length} recorded settlement${current.settlements.length === 1 ? "" : "s"}</small></article></section>
     ${narrative ? `<div class="calculation-note"><span>◇</span><p><b>Fictional witness:</b> ${h(narrative.text)} This story never changes a balance.</p></div>` : ""}
     <div class="content-grid"><section class="panel"><div class="section-title"><div><div class="eyebrow">THE WITNESSES</div><h2>People in the ledger</h2></div><a href="#members" class="text-button">All participants ↗</a></div>${current.members.length ? `<div class="member-list">${current.members.slice(0, 5).map((m) => memberCard(m, current)).join("")}</div>` : emptyState("No names have been entered.", "Add the people who shared this journey.", "#members", "Add the first participant")}</section><section class="panel recent-panel"><div class="section-title"><div><div class="eyebrow">THE LAST IMPRESSION</div><h2>Recent events</h2></div><a href="#history" class="text-button">Open memory ↗</a></div>${current.events.length ? `<div class="event-list compact">${[...current.events].reverse().slice(0, 4).map(eventRow).join("")}</div>` : emptyState("The pages are blank.", "The first record is waiting.", "#expenses", "Add an expense")}</section></div>
-    ${current.archived ? `<div class="sealed-banner"><span>✦</span><div><b>This journey is sealed.</b><p>Its record is read-only. Export it from the footer.</p></div></div>` : current.closure?.type === "provisional" ? `<div class="sealed-banner"><span>!</span><div><b>This journey has a provisional close.</b><p>${current.closureBlockers.length} open item(s) remain visible. Add records to resolve them, then close again.</p></div></div>` : current.events.length ? `<section class="closing-strip"><div><div class="eyebrow">WHEN THE JOURNEY ENDS</div><b>Keep the memory. Close the books.</b><p>A final close requires resolved records and zero balances. Otherwise the close stays provisional.</p></div><button class="button button-quiet" id="archive-button" type="button">Close this journey <span>→</span></button></section>` : ""}`;
+    ${current.archived ? `<div class="sealed-banner"><span>✦</span><div><b>This journey is sealed.</b><p>Its record is read-only. Export it from the footer.</p></div></div>` : current.closure?.type === "provisional" ? `<div class="sealed-banner"><span>!</span><div><b>This journey has a provisional close.</b><p>${current.closureBlockers.length} open item(s) remain visible. Add records to resolve them, then close again.</p></div></div>` : current.events.length && access.role === "organizer" ? `<section class="closing-strip"><div><div class="eyebrow">WHEN THE JOURNEY ENDS</div><b>Keep the memory. Close the books.</b><p>A final close requires resolved records and zero balances. Otherwise the close stays provisional.</p></div><button class="button button-quiet" id="archive-button" type="button">Close this journey <span>→</span></button></section>` : ""}`;
 }
 
 function memberCard(member, current) {
@@ -61,20 +64,24 @@ function emptyState(title, body, href, action) {
 }
 
 function membersPage(current) {
+  const canAdmin = getAccessContext().role === "organizer";
   return `${header("The Broken Mirror", "Reflections of those bound by this journey.", "CHAMBER 01 · THE WITNESSES")}
     <section class="feature-card mirror-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/broken-mirror.png" alt=""></div><div><div class="eyebrow">A NAME ENTERED BECOMES A WITNESS</div><h2>Who shared the account?</h2><p>Add the people whose spending and contributions belong in this ledger. This local level is operated by one organizer.</p></div></section>
-    ${!current.archived ? `<form class="form-panel inline-form" id="member-form"><label for="member-name">Participant name</label><div class="input-row"><input id="member-name" name="name" maxlength="48" placeholder="e.g. Alex" required autocomplete="off"><button class="button button-gold" type="submit">Add to the mirror <span>↗</span></button></div><small>Up to 100 participants. Entries are saved to the shared event log.</small></form>` : ""}
-    ${!current.archived ? `<form class="form-panel inline-form" id="invite-form"><label for="invite-name">Invite someone to this ledger</label><div class="input-row"><input id="invite-name" name="name" maxlength="80" placeholder="Participant name" required><select name="role"><option value="member">Participant</option><option value="witness">Read-only witness</option></select><button class="button button-quiet" type="submit">Create invite link</button></div><output id="invite-link" aria-live="polite"></output></form>` : ""}
+    ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="member-form"><label for="member-name">Participant name</label><div class="input-row"><input id="member-name" name="name" maxlength="48" placeholder="e.g. Alex" required autocomplete="off"><button class="button button-gold" type="submit">Add to the mirror <span>↗</span></button></div><small>Up to 100 names. Entries are saved to the shared event log.</small></form>` : ""}
+    ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="invite-form"><label for="invite-name">Invite someone to this ledger</label><div class="input-row"><input id="invite-name" name="name" maxlength="80" placeholder="Participant name" required><select name="role"><option value="member">Participant</option><option value="witness">Read-only witness</option></select><button class="button button-quiet" type="submit">Create invite link</button></div><output id="invite-link" aria-live="polite"></output></form>` : ""}
     <section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PRESENT</div><h2>Participants <span class="count">${current.members.length} / 100</span></h2></div></div>${current.members.length ? `<div class="member-list full-list">${current.members.map((m) => memberCard(m, current)).join("")}</div>` : emptyState("No reflections yet.", "Add the first participant to begin.", "#members", "Add a participant")}</section>`;
 }
 
 function expensePage(current) {
+  const access = getAccessContext();
+  const readOnly = access.role === "witness";
+  const payerOptions = current.members.filter((member) => access.role !== "member" || member.id === access.memberId);
   const enough = current.members.length >= 1;
   const rows = current.members.map((m) => `<label class="check-row"><input type="checkbox" name="beneficiary" value="${h(m.id)}" checked><span>${h(m.name)}</span></label>`).join("");
   return `${header("The Black Telephone", "Every expense leaves a trace. Every share has a rule.", "CHAMBER 02 · THE EVIDENCE")}
     <section class="feature-card phone-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/black-telephone.png" alt=""></div><div><div class="eyebrow">THE RECEIPT IS EVIDENCE</div><h2>Enter what happened.</h2><p>Receipt analysis proposes details for a person to review. It never writes into the ledger by itself.</p></div><span class="coming-tag">HUMAN REVIEW</span></section>
-    ${!current.archived ? `<section class="form-panel"><label for="receipt-image">Receipt image</label><div class="input-row"><input id="receipt-image" type="file" accept="image/jpeg,image/png,image/webp"><button class="button button-quiet" id="analyze-receipt" type="button">Propose receipt details</button></div><pre id="receipt-proposal" hidden aria-live="polite"></pre></section>` : ""}
-    ${!enough ? emptyState("The table is empty.", "Enter at least one participant before recording a cost.", "#members", "Open the Broken Mirror") : current.archived ? `<div class="sealed-banner"><span>✦</span><div><b>This ledger is read-only.</b><p>Start another local ledger to record new expenses.</p></div></div>` : `<form class="form-panel expense-form" id="expense-form"><div class="form-heading"><div><div class="eyebrow">A NEW ENTRY</div><h2>Record an expense</h2></div><span class="form-index">02 / 05</span></div><div class="field-grid"><label>Description<input name="description" maxlength="120" placeholder="Dinner, train tickets…" required></label><label>Total amount <span class="field-hint">USD</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label><label>Paid by<select name="payer" required><option value="unassigned">Unknown / unassigned</option>${current.members.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("")}</select></label><label>Allocation rule<select name="splitMode" id="split-mode"><option value="equal">Split equally</option><option value="custom">Enter each share</option></select></label></div><fieldset class="beneficiary-fieldset"><legend>Who benefited from this expense?</legend><div class="check-grid">${rows}</div></fieldset><div id="custom-shares" class="custom-shares" hidden></div><div class="form-footer"><p>Shares reconcile to the total. If the payer is unknown, the expense stays unassigned until corrected.</p><button class="button button-gold" type="submit">Write into the ledger <span>↗</span></button></div></form>`}
+    ${!current.archived && !readOnly ? `<section class="form-panel"><label for="receipt-image">Receipt image</label><div class="input-row"><input id="receipt-image" type="file" accept="image/jpeg,image/png,image/webp"><button class="button button-quiet" id="analyze-receipt" type="button">Propose receipt details</button></div><pre id="receipt-proposal" hidden aria-live="polite"></pre></section>` : ""}
+    ${!enough ? emptyState("The table is empty.", "Enter at least one participant before recording a cost.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect the expenses and their evidence." : "Start another ledger to record new expenses."}</p></div></div>` : `<form class="form-panel expense-form" id="expense-form"><div class="form-heading"><div><div class="eyebrow">A NEW ENTRY</div><h2>Record an expense</h2></div><span class="form-index">02 / 05</span></div><div class="field-grid"><label>Description<input name="description" maxlength="120" placeholder="Dinner, train tickets…" required></label><label>Total amount <span class="field-hint">USD</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label><label>Paid by<select name="payer" required><option value="unassigned">Unknown / unassigned</option>${payerOptions.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("")}</select></label><label>Allocation rule<select name="splitMode" id="split-mode"><option value="equal">Split equally</option><option value="custom">Enter each share</option></select></label></div><fieldset class="beneficiary-fieldset"><legend>Who benefited from this expense?</legend><div class="check-grid">${rows}</div></fieldset><div id="custom-shares" class="custom-shares" hidden></div><div class="form-footer"><p>Shares reconcile to the total. If the payer is unknown, the expense stays unassigned until corrected.</p><button class="button button-gold" type="submit">Write into the ledger <span>↗</span></button></div></form>`}
     <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map(expenseRow).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>`;
 }
 
@@ -110,11 +117,14 @@ function historyPage(current) {
 
 function paymentPage(current) {
   const enough = current.members.length >= 2;
+  const access = getAccessContext();
+  const readOnly = access.role === "witness";
   const options = current.members.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("");
+  const payerOptions = current.members.filter((member) => access.role !== "member" || member.id === access.memberId).map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("");
   return `${header("The Elixir", "Record a claimed settlement without confusing it for provider proof.", "CHAMBER 04 · THE SETTLEMENT")}
     <section class="feature-card elixir-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/elixir-vial.png" alt=""></div><div><div class="eyebrow">THE VIAL OF DEBT</div><h2>A payment changes the account.</h2><p>A claimed transfer stays pending. Only recipient confirmation or a completed PayPal capture changes balances.</p></div><span class="coming-tag">VERIFIED STATES</span></section>
-    ${!enough ? emptyState("Two witnesses are needed.", "Add at least two participants to record a settlement.", "#members", "Open the Broken Mirror") : current.archived ? `<div class="sealed-banner"><span>✦</span><div><b>This ledger is read-only.</b><p>Its settlement history remains available below.</p></div></div>` : `<form class="form-panel payment-form" id="payment-form"><div class="form-heading"><div><div class="eyebrow">A CLAIM OF PAYMENT</div><h2>Record a settlement</h2></div><span class="form-index">04 / 05</span></div><div class="field-grid"><label>Who paid?<select name="from" required>${options}</select></label><label>Who received?<select name="to" required>${options}</select></label><label>Amount <span class="field-hint">USD</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label></div><div class="honesty-note"><span>i</span><p><b>This remains a pending claim.</b> It does not reduce balances until the recipient confirms the transfer or PayPal reports a completed capture.</p></div><div class="form-footer"><p>A claim must match an outstanding obligation between these participants.</p><div><button class="button button-gold" type="submit">Record pending claim <span>↗</span></button><button class="button button-quiet" id="paypal-checkout" type="button">Pay through PayPal Sandbox</button></div></div></form>`}
-    <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">PAYMENT RECORD</div><h2>Settlements recorded</h2></div><span class="count">${current.settlements.length} entries</span></div>${current.settlements.length ? `<div class="expense-list">${[...current.settlements].reverse().map((event) => `<article class="expense-row"><span class="row-icon payment-icon">♢</span><span class="expense-meta"><b>${h(memberName(event.fromId))} → ${h(memberName(event.toId))}</b><small>${h(event.status ?? "recorded")} · ${eventDate(event.at)}</small></span><strong>${formatMoney(event.cents)}</strong></article>`).join("")}</div>` : emptyState("No settlement has been recorded.", "A claimed payment will be listed here.", "#payments", "Record a settlement")}</section>`;
+    ${!enough ? emptyState("Two witnesses are needed.", "Add at least two participants to record a settlement.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect payment states and confirm receipts addressed to you." : "Its settlement history remains available below."}</p></div></div>` : `<form class="form-panel payment-form" id="payment-form"><div class="form-heading"><div><div class="eyebrow">A CLAIM OF PAYMENT</div><h2>Record a settlement</h2></div><span class="form-index">04 / 05</span></div><div class="field-grid"><label>Who paid?<select name="from" required>${payerOptions}</select></label><label>Who received?<select name="to" required>${options}</select></label><label>Amount <span class="field-hint">USD</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label></div><div class="honesty-note"><span>i</span><p><b>This remains a pending claim.</b> It does not reduce balances until the recipient confirms the transfer or PayPal reports a completed capture.</p></div><div class="form-footer"><p>A claim must match an outstanding obligation between these participants.</p><div><button class="button button-gold" type="submit">Record pending claim <span>↗</span></button><button class="button button-quiet" id="paypal-checkout" type="button">Pay through PayPal Sandbox</button></div></div></form>`}
+    <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">PAYMENT RECORD</div><h2>Settlements recorded</h2></div><span class="count">${current.settlements.length} entries</span></div>${current.settlements.length ? `<div class="expense-list">${[...current.settlements].reverse().map((event) => `<article class="expense-row"><span class="row-icon payment-icon">♢</span><span class="expense-meta"><b>${h(memberName(event.fromId))} → ${h(memberName(event.toId))}</b><small>${h(event.status ?? "recorded")} · ${eventDate(event.at)}</small></span><strong>${formatMoney(event.cents)}</strong>${event.status === "pending" && event.toId === access.memberId ? `<button type="button" class="button button-quiet confirm-payment" data-settlement-id="${h(event.settlementId)}">Confirm receipt</button>` : ""}</article>`).join("")}</div>` : emptyState("No settlement has been recorded.", "A claimed payment will be listed here.", "#payments", "Record a settlement")}</section>`;
 }
 
 function verdictPage(current) {
@@ -170,11 +180,17 @@ function bindPage(current) {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/analysis/receipt`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` }, body: JSON.stringify({ mediaType: file.type, dataBase64: btoa(binary) }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Receipt analysis failed.");
+      const dataBase64 = btoa(binary);
+      const evidenceResponse = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/evidence`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` }, body: JSON.stringify({ mediaType: file.type, dataBase64 }) });
+      const evidence = await evidenceResponse.json();
+      if (!evidenceResponse.ok) throw new Error(evidence.error ?? "Could not attach receipt evidence.");
+      if (!events.some((item) => item.id === evidence.event.id)) events = [...events, evidence.event];
+      if (!pendingEvidenceIds.includes(evidence.id)) pendingEvidenceIds.push(evidence.id);
       output.textContent = JSON.stringify(result.proposal, null, 2);
       const form = document.querySelector("#expense-form");
       if (form && result.proposal.currency === "USD" && result.proposal.merchant) form.elements.description.value = result.proposal.merchant;
       if (form && result.proposal.currency === "USD" && result.proposal.total) form.elements.amount.value = result.proposal.total;
-      showToast("Proposal ready. Review each value before recording.");
+      showToast("Proposal ready and receipt evidence attached. Review each value before recording.");
     } catch (error) { if (output) { output.hidden = false; output.textContent = error.message; } }
   });
 
@@ -196,14 +212,15 @@ function bindPage(current) {
   };
   modeSelect?.addEventListener("change", updateCustom);
   expenseForm?.querySelectorAll("[name=beneficiary]").forEach((box) => box.addEventListener("change", updateCustom));
-  expenseForm?.addEventListener("submit", (event) => {
+  expenseForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
       const data = new FormData(expenseForm);
       const totalCents = parseAmountToCents(data.get("amount"));
       const payerId = data.get("payer");
       if (payerId === "unassigned") {
-        commit("EXPENSE_UNASSIGNED", { description: String(data.get("description")).trim(), totalCents, allocations: [] }, "Charge recorded as unassigned. It will not affect balances until assigned.");
+        const saved = await commit("EXPENSE_UNASSIGNED", { description: String(data.get("description")).trim(), totalCents, allocations: [], evidenceIds: [...pendingEvidenceIds] }, "Charge recorded as unassigned. It will not affect balances until assigned.");
+        if (saved) pendingEvidenceIds = [];
         return;
       }
       const ids = data.getAll("beneficiary");
@@ -217,7 +234,8 @@ function bindPage(current) {
         let remainder = totalCents - base * ids.length;
         allocations = ids.map((memberId) => ({ memberId, cents: base + (remainder-- > 0 ? 1 : 0) }));
       }
-      commit("EXPENSE_RECORDED", { description: String(data.get("description")).trim(), payerId, totalCents, allocations }, "Expense entered into the ledger.");
+      const saved = await commit("EXPENSE_RECORDED", { description: String(data.get("description")).trim(), payerId, totalCents, allocations, evidenceIds: [...pendingEvidenceIds] }, "Expense entered into the ledger.");
+      if (saved) pendingEvidenceIds = [];
     } catch (error) { showToast(error.message); }
   });
 
@@ -231,6 +249,11 @@ function bindPage(current) {
       commit("SETTLEMENT_ASSERTED", { settlementId: crypto.randomUUID(), fromMemberId: fromId, toMemberId: toId, amountMinor: cents, rail: "other" }, "Payment claim is pending. Balances remain unchanged until confirmation.");
     } catch (error) { showToast(error.message); }
   });
+
+  document.querySelectorAll(".confirm-payment").forEach((button) => button.addEventListener("click", () => {
+    const access = getAccessContext();
+    commit("SETTLEMENT_CONFIRMED", { settlementId: button.dataset.settlementId, confirmedByMemberId: access.memberId, confirmationSource: "recipient_confirmation" }, "You confirmed receipt. The settlement now updates balances.");
+  }));
 
   document.querySelector("#paypal-checkout")?.addEventListener("click", async () => {
     try {
@@ -250,6 +273,7 @@ function bindPage(current) {
 function render() {
   if (!events) return;
   const current = ledger();
+  document.querySelector("#export-button").hidden = getAccessContext().role !== "organizer";
   if (!routes.has(route)) route = "home";
   document.querySelectorAll(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.route === route));
   const pages = { home: homePage, members: membersPage, expenses: expensePage, history: historyPage, payments: paymentPage, verdict: verdictPage };

@@ -70,6 +70,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         const expense = normalizeExpense(event, baseCurrency); if (expenses.has(expense.id)) throw new Error("Expense IDs must be unique.");
         if (expense.status !== "unassigned" && (!members.has(expense.payerId) || expense.allocations.some((row) => !members.has(row.memberId)))) throw new Error("An expense must refer to participants already in this ledger.");
         if (expense.groupIds.some((groupId) => !groups.has(groupId))) throw new Error("An expense refers to an unknown subgroup.");
+        if (expense.evidenceIds.some((evidenceId) => !evidence.has(evidenceId))) throw new Error("An expense refers to evidence that has not been attached to this ledger.");
         if (expense.commitmentId && (!commitments.has(expense.commitmentId) || commitments.get(expense.commitmentId).status !== "open" || [...expenses.values()].some((prior) => prior.commitmentId === expense.commitmentId))) throw new Error("A commitment can be converted to one expense only while it is open.");
         expenses.set(expense.id, { ...expense, eventId: event.id }); break;
       }
@@ -80,6 +81,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         superseded.add(currentExpense.sourceEventId);
         const replacement = normalizeExpense({ ...event.replacement, id: event.expenseId, at: event.at, type: "EXPENSE_RECORDED" }, baseCurrency);
         if (!members.has(replacement.payerId) || replacement.allocations.some((row) => !members.has(row.memberId)) || replacement.groupIds.some((groupId) => !groups.has(groupId))) throw new Error("A corrected expense must refer to existing participants and groups.");
+        if (replacement.evidenceIds.some((evidenceId) => !evidence.has(evidenceId))) throw new Error("A corrected expense refers to unattached evidence.");
         expenses.set(replacement.id, { ...replacement, eventId: event.id, correctionReason: event.reason }); break;
       }
       case "MEMBER_CONFIRMED_EXPENSE": {
@@ -120,6 +122,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         settlements.set(event.settlementId, { ...event, status: "pending" }); break;
       case "SETTLEMENT_CONFIRMED": {
         const item = settlements.get(event.settlementId); if (!item) throw new Error("Payment confirmation references an unknown payment.");
+        if (item.status !== "pending" && item.status !== "asserted") throw new Error("Only a pending payment can be confirmed.");
         if (event.confirmationSource === "recipient_confirmation" && event.confirmedByMemberId !== item.toMemberId) throw new Error("Only the payment recipient can confirm receipt.");
         settlements.set(event.settlementId, { ...item, status: "completed", confirmation: event }); break;
       }
@@ -162,7 +165,9 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         const key = `${event.ruleId}:${event.periodKey}`; if (recurringPeriods.has(key)) throw new Error("A recurring rule can create only one instance per period.");
         recurringPeriods.add(key); break;
       }
-      case "EVIDENCE_ATTACHED": evidence.set(event.evidenceId, event); break;
+      case "EVIDENCE_ATTACHED":
+        if (evidence.has(event.evidenceId)) throw new Error("Evidence IDs must be unique in a ledger.");
+        evidence.set(event.evidenceId, event); break;
       case "SURPRISE_GIFT_RECORDED":
         if (gifts.has(event.giftId) || !members.has(event.recipientMemberId) || event.contributions.some((row) => !members.has(row.memberId))) throw new Error("Gift records must have a unique ID and known participants.");
         gifts.set(event.giftId, { ...event }); break;
@@ -255,7 +260,13 @@ export function simulateLedger(events, proposedEvents, options) {
 
 export function findPossibleDuplicates(expenses, candidate) {
   const normalize = (s) => String(s ?? "").normalize("NFKD").toLowerCase().replace(/[^a-z0-9]/g, "");
-  return expenses.filter((expense) => expense.id !== candidate.id && expense.currency === candidate.currency && expense.amountMinor === candidate.amountMinor && Math.abs(Date.parse(expense.at) - Date.parse(candidate.at)) <= 36 * 60 * 60 * 1000 && normalize(expense.description) === normalize(candidate.description)).map((expense) => ({ expenseId: expense.id, reason: "same merchant, amount, currency, and date window", confidence: "possible" }));
+  const products = (expense) => (expense.lineItems ?? []).map((item) => `${normalize(item.description)}:${item.amountMinor ?? item.cents}`).sort().join("|");
+  return expenses.filter((expense) => {
+    if (expense.id === candidate.id || expense.currency !== candidate.currency || expense.amountMinor !== candidate.amountMinor) return false;
+    if (Math.abs(Date.parse(expense.at) - Date.parse(candidate.at)) > 36 * 60 * 60 * 1000 || normalize(expense.description) !== normalize(candidate.description)) return false;
+    const left = products(expense); const right = products(candidate);
+    return !left || !right || left === right;
+  }).map((expense) => ({ expenseId: expense.id, reason: products(expense) && products(candidate) ? "same merchant, amount, currency, date window, and line items" : "same merchant, amount, currency, and date window; line-item evidence is incomplete", confidence: "possible" }));
 }
 
 export function settlementPlan(balances) {

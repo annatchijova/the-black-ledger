@@ -256,6 +256,7 @@ export function validateEvent(event, baseCurrency = "USD") {
       break;
     case "EVIDENCE_ATTACHED":
       requireId(event.evidenceId, "Evidence ID"); requireText(event.contentHash, "Evidence content hash", 64); requireText(event.mediaType, "Evidence media type", 80);
+      if (!/^[a-f0-9]{64}$/i.test(event.contentHash)) fail("Evidence content hash must be a SHA-256 digest.");
       if (!Number.isSafeInteger(event.byteLength) || event.byteLength < 1 || event.byteLength > 8_000_000) fail("Evidence file exceeds the 8 MB limit.");
       break;
     case "SURPRISE_GIFT_RECORDED":
