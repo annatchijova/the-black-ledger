@@ -54,9 +54,11 @@ function homePage(current) {
     ${current.archived ? `<div class="sealed-banner"><span>✦</span><div><b>This journey is sealed.</b><p>Its record is read-only. Export it from the footer.</p></div></div>` : current.closure?.type === "provisional" ? `<div class="sealed-banner"><span>!</span><div><b>This journey has a provisional close.</b><p>${current.closureBlockers.length} open item(s) remain visible. Add records to resolve them, then close again.</p></div></div>` : current.events.length && access.role === "organizer" ? `<section class="closing-strip"><div><div class="eyebrow">WHEN THE JOURNEY ENDS</div><b>Keep the memory. Close the books.</b><p>A final close requires resolved records and zero balances. Otherwise the close stays provisional.</p></div><button class="button button-quiet" id="archive-button" type="button">Close this journey <span>→</span></button></section>` : ""}`;
 }
 
-function memberCard(member, current) {
+function memberCard(member, current, showStatusControl = false) {
   const cents = current.balances.get(member.id) || 0;
-  return `<article class="member-row"><span class="avatar">${h(member.name.trim().slice(0, 1).toUpperCase())}</span><span class="member-name"><b>${h(member.name)}</b><small>Witness ${String(current.members.findIndex((m) => m.id === member.id) + 1).padStart(2, "0")}</small></span><strong class="money ${cents > 0 ? "credit" : cents < 0 ? "debit" : "neutral"}">${cents > 0 ? "+" : cents < 0 ? "−" : ""}${formatMoney(Math.abs(cents))}</strong></article>`;
+  const status = member.status ?? "active";
+  const statusControl = showStatusControl && getAccessContext().role === "organizer" && !current.archived && status !== "removed" ? `<button class="button button-quiet member-status" type="button" data-member-id="${h(member.id)}" data-next-status="${status === "active" ? "departed" : "active"}">${status === "active" ? "Mark departed" : "Reactivate"}</button>` : "";
+  return `<article class="member-row"><span class="avatar">${h(member.name.trim().slice(0, 1).toUpperCase())}</span><span class="member-name"><b>${h(member.name)}</b><small>${status === "active" ? "Active participant" : h(status)} · Witness ${String(current.members.findIndex((m) => m.id === member.id) + 1).padStart(2, "0")}</small></span><strong class="money ${cents > 0 ? "credit" : cents < 0 ? "debit" : "neutral"}">${cents > 0 ? "+" : cents < 0 ? "−" : ""}${formatMoney(Math.abs(cents))}</strong>${statusControl}</article>`;
 }
 
 function emptyState(title, body, href, action) {
@@ -71,7 +73,7 @@ function membersPage(current) {
     ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="invite-form"><label for="invite-name">Invite someone to this ledger</label><div class="input-row"><input id="invite-name" name="name" maxlength="80" placeholder="Participant name" required><select name="role"><option value="member">Participant</option><option value="witness">Read-only witness</option></select><button class="button button-quiet" type="submit">Create invite link</button></div><output id="invite-link" aria-live="polite"></output></form>` : ""}
     ${!current.archived && canAdmin && current.members.length ? `<form class="form-panel inline-form" id="group-form"><label for="group-name">Create a temporary subgroup</label><div class="input-row"><input id="group-name" name="name" maxlength="80" placeholder="e.g. Museum afternoon" required><button class="button button-quiet" type="submit">Create subgroup</button></div><fieldset class="beneficiary-fieldset"><legend>Participants</legend><div class="check-grid">${current.members.map((member) => `<label class="check-row"><input type="checkbox" name="groupMember" value="${h(member.id)}"><span>${h(member.name)}</span></label>`).join("")}</div></fieldset></form>` : ""}
     ${current.groups.length ? `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">TEMPORARY PARTIES</div><h2>Subgroups</h2></div><span class="count">${current.groups.length} groups</span></div><div class="member-list">${current.groups.map((group) => `<article class="member-row"><span class="avatar">◌</span><span class="member-name"><b>${h(group.name)}</b><small>${group.memberIds.map((id) => h(memberName(id))).join(", ")}</small></span></article>`).join("")}</div></section>` : ""}
-    <section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PRESENT</div><h2>Participants <span class="count">${current.members.length} / 100</span></h2></div></div>${current.members.length ? `<div class="member-list full-list">${current.members.map((m) => memberCard(m, current)).join("")}</div>` : emptyState("No reflections yet.", "Add the first participant to begin.", "#members", "Add a participant")}</section>`;
+    <section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PRESENT</div><h2>Participants <span class="count">${current.members.length} / 100</span></h2></div></div>${current.members.length ? `<div class="member-list full-list">${current.members.map((m) => memberCard(m, current, true)).join("")}</div>` : emptyState("No reflections yet.", "Add the first participant to begin.", "#members", "Add a participant")}</section>`;
 }
 
 function expensePage(current) {
@@ -204,6 +206,12 @@ function bindPage(current) {
     if (!name || current.members.length >= 100) return showToast("Enter a name; the ledger supports up to 100 participants.");
     commit("MEMBER_ADDED", { memberId: crypto.randomUUID(), name }, `${name} entered the mirror.`);
   });
+
+  document.querySelectorAll(".member-status").forEach((button) => button.addEventListener("click", () => {
+    const nextStatus = button.dataset.nextStatus;
+    const name = current.members.find((member) => member.id === button.dataset.memberId)?.name ?? "Participant";
+    commit("MEMBER_STATUS_CHANGED", { memberId: button.dataset.memberId, status: nextStatus }, nextStatus === "departed" ? `${name} marked as departed. Their ledger history and obligations remain.` : `${name} reactivated.`);
+  }));
 
   document.querySelector("#group-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
