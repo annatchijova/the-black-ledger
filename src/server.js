@@ -68,6 +68,7 @@ function append(sessionId, event, requestId, { trustedProvider = false } = {}) {
   if (!session) throw Object.assign(new Error("Session not found."), { status: 404 });
   const fingerprint = sha(canonicalStringify(event));
   if (event.type === "SETTLEMENT_RECORDED") throw Object.assign(new Error("Legacy settlement assertions cannot be appended through the shared API."), { status: 422 });
+  if (event.type === "OBLIGATION_CARRIED" || event.type === "OBLIGATION_CARRIED_OUT") throw Object.assign(new Error("Cross-session debt transfers must use the atomic carry endpoint."), { status: 422 });
   if (event.type === "SETTLEMENT_CONFIRMED" && event.confirmationSource === "provider_capture" && !trustedProvider) throw Object.assign(new Error("Provider-confirmed payments can only be recorded by the server capture flow."), { status: 403 });
   const priorRequest = db.prepare("SELECT fingerprint, response_json FROM requests WHERE session_id = ? AND request_id = ?").get(sessionId, requestId);
   if (priorRequest) {
@@ -256,15 +257,25 @@ async function route(req, res) {
       const requestId = req.headers["idempotency-key"];
       if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,120}$/.test(requestId)) return send(res, 400, { error: "A valid Idempotency-Key header is required." });
       const body = await readJson(req); const event = body.event;
-      const organizerOnly = new Set(["SETTLEMENT_REVERSED", "SETTLEMENT_STATUS_RECORDED", "SETTLEMENT_REFUNDED", "SESSION_CLOSED_PROVISIONAL", "SESSION_CLOSED_FINAL", "SESSION_REOPENED", "SESSION_ARCHIVED", "SESSION_RULES_RECORDED", "BUDGET_SET", "RECURRING_RULE_APPROVED"]);
+      const before = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
+      const organizerOnly = new Set(["MEMBER_ADDED", "MEMBER_INVITED", "MEMBER_STATUS_CHANGED", "GROUP_CREATED", "GROUP_MEMBERS_CHANGED", "EXPENSE_CORRECTED", "EXPENSE_DISCREPANCY_RESOLVED", "SETTLEMENT_REVERSED", "SETTLEMENT_STATUS_RECORDED", "SETTLEMENT_REFUNDED", "SESSION_CLOSED_PROVISIONAL", "SESSION_CLOSED_FINAL", "SESSION_REOPENED", "SESSION_ARCHIVED", "SESSION_RULES_RECORDED", "BUDGET_SET", "RECURRING_RULE_APPROVED", "RECURRING_INSTANCE_RECORDED", "SURPRISE_GIFT_RECORDED"]);
       if (organizerOnly.has(event?.type) && access.role !== "organizer") return send(res, 403, { error: "This ledger action is restricted to its organizer." });
-      if (event?.type === "SETTLEMENT_CONFIRMED" && event.confirmationSource === "recipient_confirmation" && access.member_id !== event.confirmedByMemberId && access.role !== "organizer") return send(res, 403, { error: "Only the recipient can confirm this payment." });
+      const actor = access.member_id;
+      if (actor && before.members.find((member) => member.id === actor)?.status !== "active") return send(res, 403, { error: "Departed or removed participants cannot change this ledger." });
+      if (actor && event?.type === "EXPENSE_RECORDED" && event.paidByMemberId !== actor && event.payerId !== actor) return send(res, 403, { error: "A participant can only enter an expense they paid." });
+      if (actor && event?.type === "MEMBER_CONFIRMED_EXPENSE" && event.memberId !== actor) return send(res, 403, { error: "A participant can only confirm their own expense allocation." });
+      if (actor && event?.type === "EXPENSE_DISCREPANCY_RECORDED" && event.raisedByMemberId !== actor) return send(res, 403, { error: "A participant can only raise a discrepancy under their own name." });
+      if (actor && event?.type === "SETTLEMENT_ASSERTED" && event.fromMemberId !== actor) return send(res, 403, { error: "A participant can only claim a payment they made." });
+      if (actor && event?.type === "OBLIGATION_FORGIVEN" && event.creditorId !== actor) return send(res, 403, { error: "Only the creditor can forgive this obligation." });
+      if (actor && event?.type === "RESPONSIBILITY_ASSUMED" && event.toMemberId !== actor) return send(res, 403, { error: "The participant assuming responsibility must submit the event." });
+      if (actor && event?.type === "COMMITMENT_RECORDED" && event.payerMemberId !== actor) return send(res, 403, { error: "A participant can only create their own commitment." });
+      if (actor && ["COMMITMENT_UPDATED", "COMMITMENT_REFUND_RECORDED"].includes(event?.type) && before.commitments.find((item) => item.commitmentId === event.commitmentId)?.payerMemberId !== actor) return send(res, 403, { error: "Only the commitment payer can update or refund it." });
+      if (event?.type === "SETTLEMENT_CONFIRMED" && event.confirmationSource === "recipient_confirmation" && (access.role !== "member" || access.member_id !== event.confirmedByMemberId)) return send(res, 403, { error: "Only the recipient's own participant token can confirm this payment." });
       if (event?.type === "SETTLEMENT_CONFIRMED" && event.confirmationSource === "organizer_record" && access.role !== "organizer") return send(res, 403, { error: "Only the organizer can record this confirmation." });
       if (event?.type === "EVIDENCE_ATTACHED") {
         const file = db.prepare("SELECT sha256, media_type, byte_length FROM evidence WHERE id = ? AND session_id = ?").get(event.evidenceId, sessionId);
         if (!file || file.sha256 !== event.contentHash || file.media_type !== event.mediaType || file.byte_length !== event.byteLength) return send(res, 422, { error: "Evidence event must match an uploaded file in this session." });
       }
-      const before = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
       const result = append(sessionId, event, requestId);
       if (["EXPENSE_RECORDED", "EXPENSE_UNASSIGNED"].includes(event.type)) {
         const current = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });

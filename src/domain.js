@@ -88,7 +88,9 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         if (expense.status !== "unassigned" && expense.payerId !== event.memberId && !expense.allocations.some((row) => row.memberId === event.memberId)) throw new Error("Participants can only confirm expenses assigned to them.");
         confirmations.set(`${event.expenseId}:${event.memberId}`, event); break;
       }
-      case "EXPENSE_DISCREPANCY_RECORDED": discrepancies.set(event.discrepancyId, { ...event }); break;
+      case "EXPENSE_DISCREPANCY_RECORDED":
+        if (!expenses.has(event.expenseId) || !members.has(event.raisedByMemberId) || discrepancies.has(event.discrepancyId)) throw new Error("A discrepancy must point to a known expense, participant, and unique ID.");
+        discrepancies.set(event.discrepancyId, { ...event }); break;
       case "EXPENSE_DISCREPANCY_RESOLVED": {
         const discrepancy = discrepancies.get(event.discrepancyId); if (!discrepancy) throw new Error("Discrepancy resolution references an unknown issue.");
         discrepancies.set(event.discrepancyId, { ...discrepancy, resolution: event.resolution, resolvedAt: event.at }); break;
@@ -118,6 +120,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         settlements.set(event.settlementId, { ...event, status: "pending" }); break;
       case "SETTLEMENT_CONFIRMED": {
         const item = settlements.get(event.settlementId); if (!item) throw new Error("Payment confirmation references an unknown payment.");
+        if (event.confirmationSource === "recipient_confirmation" && event.confirmedByMemberId !== item.toMemberId) throw new Error("Only the payment recipient can confirm receipt.");
         settlements.set(event.settlementId, { ...item, status: "completed", confirmation: event }); break;
       }
       case "SETTLEMENT_STATUS_RECORDED": {
