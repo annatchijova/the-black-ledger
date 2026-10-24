@@ -216,7 +216,7 @@ export function validateEvent(event, baseCurrency = "USD") {
       break;
     case "SETTLEMENT_STATUS_RECORDED":
       requireId(event.settlementId, "Settlement ID");
-      if (!new Set(["pending", "denied"]).has(event.status)) fail("Settlement status must be pending or denied.");
+      if (!new Set(["pending", "denied", "cancelled"]).has(event.status)) fail("Settlement status must be pending, denied, or cancelled.");
       requireText(event.reason, "Settlement status reason", 500);
       break;
     case "SETTLEMENT_REFUNDED":
@@ -260,7 +260,7 @@ export function validateEvent(event, baseCurrency = "USD") {
       if (!Number.isSafeInteger(event.byteLength) || event.byteLength < 1 || event.byteLength > 8_000_000) fail("Evidence file exceeds the 8 MB limit.");
       break;
     case "SURPRISE_GIFT_RECORDED":
-      requireId(event.giftId, "Gift ID"); requireId(event.recipientMemberId, "Gift recipient"); requireText(event.privateDescription, "Gift description", 240); requireAmount(event.amountMinor);
+      requireId(event.giftId, "Gift ID"); requireId(event.recipientMemberId, "Gift recipient"); requireId(event.payerMemberId, "Gift payer"); requireText(event.privateDescription, "Gift description", 240); requireAmount(event.amountMinor);
       requireAllocations(event.contributions);
       if (requireAllocations(event.contributions) !== event.amountMinor) fail("Gift contributions must reconcile exactly.");
       break;

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS requests (session_id TEXT NOT NULL, request_id TEXT N
 CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), sha256 TEXT NOT NULL, media_type TEXT NOT NULL, byte_length INTEGER NOT NULL, content BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS session_tokens (token_hash TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), role TEXT NOT NULL, member_id TEXT, created_at TEXT NOT NULL, revoked_at TEXT);
 CREATE TABLE IF NOT EXISTS paypal_orders (order_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, status TEXT NOT NULL, capture_id TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS paypal_order_requests (session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, status TEXT NOT NULL, order_id TEXT, approval_url TEXT, created_at TEXT NOT NULL, PRIMARY KEY(session_id, request_id));
 CREATE TABLE IF NOT EXISTS session_patterns (session_id TEXT PRIMARY KEY REFERENCES sessions(id), pattern TEXT NOT NULL, recorded_at TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS evidence_session_digest ON evidence(session_id, sha256);
 `);
@@ -77,6 +78,11 @@ function append(sessionId, event, requestId, { trustedProvider = false } = {}) {
     return JSON.parse(priorRequest.response_json);
   }
   const current = getEvents(sessionId);
+  if (event.type === "SETTLEMENT_CONFIRMED" && !trustedProvider) {
+    const previousLedger = deriveLedger(current.events, { baseCurrency: session.base_currency });
+    const payment = previousLedger.settlements.find((item) => item.settlementId === event.settlementId);
+    if (payment?.rail === "paypal") throw Object.assign(new Error("PayPal settlements can only be confirmed by the server capture flow."), { status: 403 });
+  }
   const candidate = parseEventLog([...current.events, event], session.base_currency);
   const next = deriveLedger(candidate, { baseCurrency: session.base_currency });
   const sequence = session.event_count + 1;
@@ -95,12 +101,16 @@ function append(sessionId, event, requestId, { trustedProvider = false } = {}) {
   return response;
 }
 
-function publicState(ledger) {
+function publicState(ledger, access = {}) {
+  const expenses = ledger.expenses.map((expense) => {
+    const gift = expense.giftId ? ledger.gifts.find((item) => item.giftId === expense.giftId) : null;
+    return { ...expense, description: gift && access.member_id === gift.recipientMemberId ? "Confidential surprise gift" : expense.description, totalCents: expense.baseAmountMinor };
+  });
   return {
     session: ledger.session,
     members: ledger.members,
     groups: ledger.groups,
-    expenses: ledger.expenses,
+    expenses,
     settlements: ledger.settlements,
     commitments: ledger.commitments,
     discrepancies: ledger.discrepancies,
@@ -129,7 +139,7 @@ async function route(req, res) {
     const response = append(sessionId, createEvent, `create:${sessionId}`);
     return send(res, 201, { sessionId, accessToken, ...response });
   }
-  const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,100})(?:\/(events|evidence|export|analysis\/(?:receipt|scenario)|simulate|invitations|carry-debt|payments(?:\/[A-Z0-9-]+\/capture)?))?$/.exec(url.pathname);
+  const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,100})(?:\/(events|evidence|export|analysis\/(?:receipt|scenario)|simulate|invitations|carry-debt|payments(?:\/[A-Z0-9-]+\/(?:capture|cancel))?))?$/.exec(url.pathname);
   if (match) {
     const [, sessionId, resource] = match;
     const session = db.prepare("SELECT id, base_currency FROM sessions WHERE id = ?").get(sessionId);
@@ -141,7 +151,7 @@ async function route(req, res) {
     if (req.method === "GET" && (!resource || resource === "events")) {
       const { events, headHash } = getEvents(sessionId); const ledger = deriveLedger(events, { baseCurrency: session.base_currency });
       const visibleEvents = events.map((event) => event.type === "SURPRISE_GIFT_RECORDED" && event.recipientMemberId === access.member_id ? { ...event, privateDescription: "[hidden from recipient]" } : event);
-      return send(res, 200, { sessionId, baseCurrency: session.base_currency, access: { role: access.role, memberId: access.member_id }, events: visibleEvents, headHash, state: publicState(ledger) });
+      return send(res, 200, { sessionId, baseCurrency: session.base_currency, access: { role: access.role, memberId: access.member_id }, events: visibleEvents, headHash, state: publicState(ledger, access) });
     }
     if (req.method === "GET" && resource === "export") {
       if (access.role !== "organizer") return send(res, 403, { error: "Only the organizer can export the complete evidence package." });
@@ -292,20 +302,101 @@ async function route(req, res) {
     }
     if (req.method === "POST" && resource === "payments") {
       const body = await readJson(req, 16_000);
+      const requestId = req.headers["idempotency-key"];
+      if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,120}$/.test(requestId)) return send(res, 400, { error: "A valid Idempotency-Key header is required." });
       if (access.role === "member" && access.member_id !== body.fromMemberId) return send(res, 403, { error: "A participant can only create a PayPal order for their own obligation." });
+      const fingerprint = sha(canonicalStringify(body));
+      const previous = db.prepare("SELECT * FROM paypal_order_requests WHERE session_id = ? AND request_id = ?").get(sessionId, requestId);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) return send(res, 409, { error: "This idempotency key was already used for a different PayPal order." });
+        if (previous.status === "created" && Date.now() - Date.parse(previous.created_at) < 3 * 60 * 60 * 1000) return send(res, 200, { orderId: previous.order_id, status: "CREATED", approvalUrl: previous.approval_url, fromMemberId: previous.from_member_id, toMemberId: previous.to_member_id, amountMinor: previous.amount_minor, currency: "USD", replayed: true });
+        if (previous.status === "created") {
+          const orderRecord = db.prepare("SELECT status FROM paypal_orders WHERE order_id = ? AND session_id = ?").get(previous.order_id, sessionId);
+          const expiredAt = new Date(Date.parse(previous.created_at) + 3 * 60 * 60 * 1000).toISOString();
+          if (orderRecord?.status === "created") {
+            const expired = { id: `paypal_${previous.order_id}_expired`, at: expiredAt, type: "SETTLEMENT_STATUS_RECORDED", settlementId: `paypal_${previous.order_id}`, status: "denied", reason: "PayPal approval window expired without capture." };
+            append(sessionId, expired, `paypal-expire-${previous.order_id}`);
+            db.prepare("UPDATE paypal_orders SET status = 'expired' WHERE order_id = ? AND session_id = ?").run(previous.order_id, sessionId);
+          }
+          db.prepare("UPDATE paypal_order_requests SET status = 'expired' WHERE session_id = ? AND request_id = ?").run(sessionId, requestId);
+          return send(res, 409, { error: "This approval window expired. Start a new checkout with a new idempotency key." });
+        }
+        if (previous.status === "cancelled" || previous.status === "expired") return send(res, 409, { error: "This PayPal attempt is terminal. Start a new checkout with a new idempotency key." });
+        if (previous.status === "creating" && Date.now() - Date.parse(previous.created_at) < 60_000) return send(res, 409, { error: "This PayPal order is still being created. Retry with the same idempotency key shortly." });
+        if (previous.status === "completed") return send(res, 409, { error: "This PayPal order was already captured." });
+        if (["failed", "creating"].includes(previous.status) && previous.order_id) {
+          const priorOrder = db.prepare("SELECT * FROM paypal_orders WHERE order_id = ? AND session_id = ?").get(previous.order_id, sessionId);
+          if (priorOrder?.status === "created") {
+            const priorEvents = getEvents(sessionId).events;
+            if (!priorEvents.some((event) => event.id === `paypal_${priorOrder.order_id}_assert`)) {
+              const event = { id: `paypal_${priorOrder.order_id}_assert`, at: priorOrder.created_at, type: "SETTLEMENT_ASSERTED", settlementId: `paypal_${priorOrder.order_id}`, fromMemberId: priorOrder.from_member_id, toMemberId: priorOrder.to_member_id, amountMinor: priorOrder.amount_minor, rail: "paypal" };
+              append(sessionId, event, `paypal-order-${priorOrder.order_id}-assert`);
+            }
+            db.prepare("UPDATE paypal_order_requests SET status = 'created' WHERE session_id = ? AND request_id = ?").run(sessionId, requestId);
+            return send(res, 200, { orderId: priorOrder.order_id, status: "CREATED", approvalUrl: previous.approval_url, fromMemberId: priorOrder.from_member_id, toMemberId: priorOrder.to_member_id, amountMinor: priorOrder.amount_minor, currency: "USD", replayed: true });
+          }
+          if (priorOrder) return send(res, 409, { error: "This PayPal order is terminal. Start a new checkout with a new idempotency key." });
+        }
+      }
       const ledger = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
       const due = ledger.outstanding.find((item) => item.debtorId === body.fromMemberId && item.creditorId === body.toMemberId)?.amountMinor ?? 0;
       const claimed = ledger.pendingClaims.find((item) => item.fromMemberId === body.fromMemberId && item.toMemberId === body.toMemberId)?.amountMinor ?? 0;
-      const amount = due - claimed;
-      if (!amount || !Number.isSafeInteger(amount) || amount < 1) return send(res, 409, { error: "No confirmed outstanding obligation exists for this participant pair." });
+      const available = due - claimed;
+      const amount = previous ? previous.amount_minor : body.amountMinor ?? available;
+      if (!Number.isSafeInteger(amount) || amount < 1 || amount > available) return send(res, 409, { error: "Checkout amount must fit within the unclaimed outstanding obligation.", availableMinor: available });
       if (session.base_currency !== "USD") return send(res, 422, { error: "PayPal Checkout currently requires a USD ledger session." });
       const config = paypalConfig();
       if (body.toMemberId !== config.payeeMemberId) return send(res, 422, { error: "PayPal Checkout can currently settle only obligations owed to the configured merchant participant." });
+      const sessionSnapshot = db.prepare("SELECT event_count, head_hash FROM sessions WHERE id = ?").get(sessionId);
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const latestSession = db.prepare("SELECT event_count, head_hash FROM sessions WHERE id = ?").get(sessionId);
+        if (latestSession.event_count !== sessionSnapshot.event_count || latestSession.head_hash !== sessionSnapshot.head_hash) throw Object.assign(new Error("The ledger changed while preparing checkout; reload and retry."), { status: 409 });
+        const reservations = db.prepare("SELECT request_id, amount_minor, created_at, status, order_id FROM paypal_order_requests WHERE session_id = ? AND from_member_id = ? AND to_member_id = ? AND status IN ('creating', 'created')").all(sessionId, body.fromMemberId, body.toMemberId);
+        const reserved = reservations.filter((row) => row.request_id !== requestId && Date.now() - Date.parse(row.created_at) < 3 * 60 * 60 * 1000 && (row.status === "creating" || !ledger.settlements.some((payment) => payment.settlementId === `paypal_${row.order_id}`))).reduce((total, row) => total + row.amount_minor, 0);
+        const available = due - claimed - reserved;
+        if (amount > available) throw Object.assign(new Error("Another checkout already reserves part of this obligation."), { status: 409 });
+        if (previous) db.prepare("UPDATE paypal_order_requests SET amount_minor = ?, status = 'creating', created_at = ? WHERE session_id = ? AND request_id = ?").run(amount, new Date().toISOString(), sessionId, requestId);
+        else db.prepare("INSERT INTO paypal_order_requests(session_id, request_id, fingerprint, from_member_id, to_member_id, amount_minor, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'creating', ?)").run(sessionId, requestId, fingerprint, body.fromMemberId, body.toMemberId, amount, new Date().toISOString());
+        db.exec("COMMIT");
+      } catch (error) { db.exec("ROLLBACK"); throw error; }
       const appBase = (process.env.APP_BASE_URL ?? "http://127.0.0.1:4173").replace(/\/$/, "");
-      const order = await paypalRequest("/v2/checkout/orders", { method: "POST", headers: { "PayPal-Request-Id": `ledger-order-${randomUUID()}` }, body: JSON.stringify({ intent: "CAPTURE", purchase_units: [{ reference_id: `${sessionId}:${body.fromMemberId}:${body.toMemberId}`, description: "Shared expense settlement", amount: { currency_code: "USD", value: `${Math.floor(amount / 100)}.${String(amount % 100).padStart(2, "0")}` }, ...(config.payee ? { payee: { merchant_id: config.payee } } : {}) }], application_context: { return_url: `${appBase}/?payment=return`, cancel_url: `${appBase}/?payment=cancel`, shipping_preference: "NO_SHIPPING", user_action: "PAY_NOW" } }) });
-      if (!order.id) throw Object.assign(new Error("PayPal did not return an order ID."), { status: 502 });
-      db.prepare("INSERT INTO paypal_orders(order_id, session_id, from_member_id, to_member_id, amount_minor, status, created_at) VALUES (?, ?, ?, ?, ?, 'created', ?)").run(order.id, sessionId, body.fromMemberId, body.toMemberId, amount, new Date().toISOString());
-      return send(res, 201, { orderId: order.id, status: order.status, approvalUrl: order.links?.find((link) => link.rel === "approve")?.href, fromMemberId: body.fromMemberId, toMemberId: body.toMemberId, amountMinor: amount, currency: "USD" });
+      try {
+        const providerRequestId = `bl_${sha(requestId).slice(0, 32)}`;
+        const order = await paypalRequest("/v2/checkout/orders", { method: "POST", headers: { "PayPal-Request-Id": providerRequestId }, body: JSON.stringify({ intent: "CAPTURE", purchase_units: [{ reference_id: `${sessionId}:${body.fromMemberId}:${body.toMemberId}`, description: "Shared expense settlement", amount: { currency_code: "USD", value: `${Math.floor(amount / 100)}.${String(amount % 100).padStart(2, "0")}` }, ...(config.payee ? { payee: { merchant_id: config.payee } } : {}) }], application_context: { return_url: `${appBase}/?payment=return`, cancel_url: `${appBase}/?payment=cancel`, shipping_preference: "NO_SHIPPING", user_action: "PAY_NOW" } }) });
+        if (!order.id) throw Object.assign(new Error("PayPal did not return an order ID."), { status: 502 });
+        const approvalUrl = order.links?.find((link) => link.rel === "approve")?.href;
+        if (!approvalUrl) throw Object.assign(new Error("PayPal returned no buyer approval link."), { status: 502 });
+        const orderCreatedAt = new Date().toISOString();
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          db.prepare("INSERT INTO paypal_orders(order_id, session_id, from_member_id, to_member_id, amount_minor, status, created_at) VALUES (?, ?, ?, ?, ?, 'created', ?)").run(order.id, sessionId, body.fromMemberId, body.toMemberId, amount, orderCreatedAt);
+          db.prepare("UPDATE paypal_order_requests SET status = 'creating', order_id = ?, approval_url = ?, created_at = ? WHERE session_id = ? AND request_id = ?").run(order.id, approvalUrl, orderCreatedAt, sessionId, requestId);
+          db.exec("COMMIT");
+        } catch (error) { db.exec("ROLLBACK"); throw error; }
+        const pendingEvent = { id: `paypal_${order.id}_assert`, at: orderCreatedAt, type: "SETTLEMENT_ASSERTED", settlementId: `paypal_${order.id}`, fromMemberId: body.fromMemberId, toMemberId: body.toMemberId, amountMinor: amount, rail: "paypal" };
+        append(sessionId, pendingEvent, `paypal-order-${order.id}-assert`);
+        db.prepare("UPDATE paypal_order_requests SET status = 'created' WHERE session_id = ? AND request_id = ?").run(sessionId, requestId);
+        return send(res, 201, { orderId: order.id, status: order.status, approvalUrl, fromMemberId: body.fromMemberId, toMemberId: body.toMemberId, amountMinor: amount, currency: "USD" });
+      } catch (error) {
+        db.prepare("UPDATE paypal_order_requests SET status = 'failed' WHERE session_id = ? AND request_id = ? AND status = 'creating'").run(sessionId, requestId);
+        throw error;
+      }
+    }
+    if (req.method === "POST" && /^payments\/[^/]+\/cancel$/.test(resource ?? "")) {
+      const orderId = resource.split("/")[1];
+      const order = db.prepare("SELECT * FROM paypal_orders WHERE order_id = ? AND session_id = ?").get(orderId, sessionId);
+      if (!order) return send(res, 404, { error: "PayPal order was not created for this ledger session." });
+      if (access.role === "member" && access.member_id !== order.from_member_id) return send(res, 403, { error: "A participant can only cancel their own PayPal order." });
+      if (order.status !== "created") return send(res, 200, { status: order.status, orderId });
+      // Keep the event payload stable if the client retries after an append succeeded
+      // but before the order rows were updated.
+      const at = order.created_at;
+      const cancelled = { id: `paypal_${orderId}_cancelled`, at, type: "SETTLEMENT_STATUS_RECORDED", settlementId: `paypal_${orderId}`, status: "cancelled", reason: "Buyer cancelled PayPal approval." };
+      append(sessionId, cancelled, `paypal-order-${orderId}-cancelled`);
+      db.prepare("UPDATE paypal_orders SET status = 'cancelled' WHERE order_id = ? AND session_id = ?").run(orderId, sessionId);
+      db.prepare("UPDATE paypal_order_requests SET status = 'cancelled' WHERE order_id = ? AND session_id = ?").run(orderId, sessionId);
+      return send(res, 200, { status: "CANCELLED", orderId });
     }
     if (req.method === "POST" && /^payments\/[^/]+\/capture$/.test(resource ?? "")) {
       const orderId = resource.split("/")[1];
@@ -314,24 +405,35 @@ async function route(req, res) {
       if (!storedOrder) return send(res, 404, { error: "PayPal order was not created for this ledger session." });
       if (access.role === "member" && access.member_id !== storedOrder.from_member_id) return send(res, 403, { error: "A participant can only capture their own PayPal order." });
       if (storedOrder.status === "completed" && storedOrder.capture_id) return send(res, 200, { status: "COMPLETED", orderId, captureId: storedOrder.capture_id, alreadyRecorded: true });
+      if (storedOrder.status !== "created") return send(res, 409, { error: `This PayPal order is ${storedOrder.status} and cannot be captured.` });
       const capture = await paypalRequest(`/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, { method: "POST", headers: { "PayPal-Request-Id": `ledger-capture-${orderId}` }, body: "{}" });
       const unit = capture.purchase_units?.[0]; const payment = unit?.payments?.captures?.[0];
-      if (capture.status !== "COMPLETED" || payment?.status !== "COMPLETED") return send(res, 202, { status: payment?.status ?? capture.status, orderId, message: "Payment remains unconfirmed in the ledger." });
+      if (capture.status !== "COMPLETED" || payment?.status !== "COMPLETED") {
+        const providerStatus = payment?.status ?? capture.status;
+        if (["DENIED", "VOIDED"].includes(providerStatus)) {
+          const statusEvent = { id: `paypal_${orderId}_denied`, at: capture.update_time ?? storedOrder.created_at, type: "SETTLEMENT_STATUS_RECORDED", settlementId: `paypal_${orderId}`, status: "denied", reason: `PayPal reported ${providerStatus}.` };
+          append(sessionId, statusEvent, `paypal-order-${orderId}-denied`);
+          db.prepare("UPDATE paypal_orders SET status = ? WHERE order_id = ? AND session_id = ?").run(providerStatus.toLowerCase(), orderId, sessionId);
+          db.prepare("UPDATE paypal_order_requests SET status = 'failed' WHERE order_id = ? AND session_id = ?").run(orderId, sessionId);
+        }
+        return send(res, 202, { status: providerStatus, orderId, message: "Payment remains unconfirmed in the ledger." });
+      }
       const reference = String(unit.reference_id ?? "").split(":");
       if (reference.length !== 3 || reference[0] !== sessionId || reference[1] !== storedOrder.from_member_id || reference[2] !== storedOrder.to_member_id) return send(res, 409, { error: "PayPal order does not match its stored ledger obligation." });
       const [, fromMemberId, toMemberId] = reference;
       const capturedMinor = parseAmountToMinor(payment.amount?.value, payment.amount?.currency_code);
       const latest = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
       const due = latest.outstanding.find((item) => item.debtorId === fromMemberId && item.creditorId === toMemberId)?.amountMinor ?? 0;
+      const orderSettlementId = `paypal_${orderId}`;
+      const orderClaim = latest.settlements.find((item) => item.settlementId === orderSettlementId && item.status === "pending");
       const claimed = latest.pendingClaims.find((item) => item.fromMemberId === fromMemberId && item.toMemberId === toMemberId)?.amountMinor ?? 0;
-      if (capturedMinor !== storedOrder.amount_minor || capturedMinor > due - claimed || payment.amount?.currency_code !== session.base_currency) return send(res, 409, { error: "Captured amount no longer fits the outstanding ledger obligation; manual reconciliation is required.", capturedMinor, availableMinor: due - claimed });
+      const otherClaims = claimed - (orderClaim?.amountMinor ?? 0);
+      if (!orderClaim || capturedMinor !== storedOrder.amount_minor || capturedMinor !== orderClaim.amountMinor || capturedMinor > due - otherClaims || payment.amount?.currency_code !== session.base_currency) return send(res, 409, { error: "Captured amount no longer fits the outstanding ledger obligation; manual reconciliation is required.", capturedMinor, availableMinor: due - otherClaims });
       const occurredAt = payment.create_time ?? capture.update_time ?? new Date().toISOString();
-      const event = { id: `paypal_${payment.id}_assert`, at: occurredAt, type: "SETTLEMENT_ASSERTED", settlementId: `paypal_${payment.id}`, fromMemberId, toMemberId, amountMinor: capturedMinor, rail: "paypal" };
-      const eventId = `paypal-capture-${payment.id}`;
-      const asserted = append(sessionId, event, eventId);
-      const confirmation = { id: `paypal_${payment.id}_confirmed`, at: occurredAt, type: "SETTLEMENT_CONFIRMED", settlementId: event.settlementId, confirmedByMemberId: toMemberId, confirmationSource: "provider_capture", provider: "paypal", providerCaptureId: payment.id, providerStatus: "COMPLETED" };
-      const confirmed = append(sessionId, confirmation, `${eventId}-confirmed`, { trustedProvider: true });
+      const confirmation = { id: `paypal_${payment.id}_confirmed`, at: occurredAt, type: "SETTLEMENT_CONFIRMED", settlementId: orderSettlementId, confirmedByMemberId: toMemberId, confirmationSource: "provider_capture", provider: "paypal", providerCaptureId: payment.id, providerStatus: "COMPLETED" };
+      const confirmed = append(sessionId, confirmation, `paypal-capture-${payment.id}-confirmed`, { trustedProvider: true });
       db.prepare("UPDATE paypal_orders SET status = 'completed', capture_id = ? WHERE order_id = ? AND session_id = ?").run(payment.id, orderId, sessionId);
+      db.prepare("UPDATE paypal_order_requests SET status = 'completed' WHERE order_id = ? AND session_id = ?").run(orderId, sessionId);
       return send(res, 200, { status: "COMPLETED", orderId, captureId: payment.id, event: confirmed.event, headHash: confirmed.headHash });
     }
     if (req.method === "POST" && resource === "evidence") {

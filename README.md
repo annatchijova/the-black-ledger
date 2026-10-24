@@ -37,8 +37,9 @@ Open `http://127.0.0.1:4173`. Copy `.env.example` to `.env` to configure integra
 - `POST /api/sessions/:sessionId/analysis/receipt` with `{ "mediaType": "image/jpeg", "dataBase64": "..." }`
 - `POST /api/sessions/:sessionId/analysis/scenario` with `{ "prompt": "..." }`; AI proposes events and deterministic simulation computes balances without writing
 - `POST /api/sessions/:sessionId/simulate` with `{ "proposedEvents": [ ... ] }`; this endpoint never writes events
-- `POST /api/sessions/:sessionId/payments` with `{ "fromMemberId": "...", "toMemberId": "..." }` to create an order for an existing obligation
+- `POST /api/sessions/:sessionId/payments` with an `Idempotency-Key` and `{ "fromMemberId": "...", "toMemberId": "...", "amountMinor": 2500 }` to reserve a pending claim and create a PayPal order
 - `POST /api/sessions/:sessionId/payments/:orderId/capture` after buyer approval
+- `POST /api/sessions/:sessionId/payments/:orderId/cancel` when the buyer cancels approval
 
 PayPal configuration is server-side: `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_MERCHANT_ID`, and `PAYPAL_PAYEE_MEMBER_ID`. The default API host is the PayPal Sandbox; `PAYPAL_BASE_URL` can override it for a controlled environment. Receipt proposals need `OPENAI_API_KEY`; `OPENAI_RECEIPT_MODEL` selects the model. Never put credentials in browser code.
 

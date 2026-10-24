@@ -28,7 +28,20 @@ export async function loadLedger() {
     try {
       const response = await request(api(sessionId));
       accessContext = response.access ?? { role: "organizer", memberId: null };
-      return parseEventLog(response.events);
+      let events = parseEventLog(response.events);
+      const oldRaw = invite ? null : localStorage.getItem(LEGACY_KEY);
+      if (oldRaw !== null && accessContext.role === "organizer") {
+        const legacy = parseEventLog(JSON.parse(oldRaw));
+        const existingIds = new Set(events.map((event) => event.id));
+        for (const original of legacy) {
+          for (const event of migrateEvents(original)) {
+            if (existingIds.has(event.id)) continue;
+            const result = await request(`${api(sessionId)}/events`, { method: "POST", headers: { "Idempotency-Key": `migration-${event.id}` }, body: JSON.stringify({ event }) });
+            events.push(result.event); existingIds.add(event.id);
+          }
+        }
+      }
+      return parseEventLog(events);
     }
     catch (error) {
       const message = String(error.message);
@@ -47,11 +60,22 @@ export async function loadLedger() {
   localStorage.setItem(TOKEN_KEY, created.accessToken);
   accessContext = { role: "organizer", memberId: null };
   let events = [created.event];
-  for (const event of legacy) {
-    const result = await request(`${api(created.sessionId)}/events`, { method: "POST", headers: { "Idempotency-Key": `migration-${event.id}` }, body: JSON.stringify({ event }) });
-    events.push(result.event);
+  for (const original of legacy) {
+    for (const event of migrateEvents(original)) {
+      const result = await request(`${api(created.sessionId)}/events`, { method: "POST", headers: { "Idempotency-Key": `migration-${event.id}` }, body: JSON.stringify({ event }) });
+      events.push(result.event);
+    }
   }
   return parseEventLog(events);
+}
+
+function migrateEvents(event) {
+  if (event.type !== "SETTLEMENT_RECORDED") return [event];
+  const settlementId = `legacy_${event.id}`;
+  return [
+    { id: `legacy_${event.id}_assert`, at: event.at, type: "SETTLEMENT_ASSERTED", settlementId, fromMemberId: event.fromId, toMemberId: event.toId, amountMinor: event.cents, rail: "other" },
+    { id: `legacy_${event.id}_confirmed`, at: event.at, type: "SETTLEMENT_CONFIRMED", settlementId, confirmedByMemberId: event.toId, confirmationSource: "organizer_record" }
+  ];
 }
 
 export function getAccessContext() { return { ...accessContext }; }

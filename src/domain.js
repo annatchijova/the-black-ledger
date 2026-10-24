@@ -169,8 +169,12 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         if (evidence.has(event.evidenceId)) throw new Error("Evidence IDs must be unique in a ledger.");
         evidence.set(event.evidenceId, event); break;
       case "SURPRISE_GIFT_RECORDED":
-        if (gifts.has(event.giftId) || !members.has(event.recipientMemberId) || event.contributions.some((row) => !members.has(row.memberId))) throw new Error("Gift records must have a unique ID and known participants.");
-        gifts.set(event.giftId, { ...event }); break;
+        if (gifts.has(event.giftId) || !members.has(event.recipientMemberId) || !members.has(event.payerMemberId) || event.recipientMemberId === event.payerMemberId || event.contributions.some((row) => !members.has(row.memberId) || row.memberId === event.recipientMemberId)) throw new Error("Gift records need a unique ID, a separate recipient, and known contributors.");
+        gifts.set(event.giftId, { ...event });
+        const giftExpenseId = `gift_${event.giftId}`;
+        if (expenses.has(giftExpenseId)) throw new Error("Gift expense IDs must be unique.");
+        expenses.set(giftExpenseId, { id: giftExpenseId, description: event.privateDescription, payerId: event.payerMemberId, amountMinor: event.amountMinor, currency: baseCurrency, baseAmountMinor: event.amountMinor, allocations: event.contributions.map((row) => ({ memberId: row.memberId, baseMinor: row.baseMinor ?? row.amountMinor ?? row.cents })), status: "posted", groupIds: [], lineItems: [], evidenceIds: [], visibility: "private", anonymousPayer: false, sourceEventId: event.id, at: event.at, giftId: event.giftId });
+        break;
       case "SESSION_CLOSED_PROVISIONAL": closure = { type: "provisional", at: event.at, reason: event.reason, blockers: closureBlockers({ expenses, confirmations, commitments, discrepancies, settlements }) }; break;
       case "SESSION_CLOSED_FINAL": {
         const blockers = closureBlockers({ expenses, confirmations, commitments, discrepancies, settlements });
