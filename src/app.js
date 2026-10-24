@@ -69,6 +69,8 @@ function membersPage(current) {
     <section class="feature-card mirror-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/broken-mirror.png" alt=""></div><div><div class="eyebrow">A NAME ENTERED BECOMES A WITNESS</div><h2>Who shared the account?</h2><p>Add the people whose spending and contributions belong in this ledger. This local level is operated by one organizer.</p></div></section>
     ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="member-form"><label for="member-name">Participant name</label><div class="input-row"><input id="member-name" name="name" maxlength="48" placeholder="e.g. Alex" required autocomplete="off"><button class="button button-gold" type="submit">Add to the mirror <span>↗</span></button></div><small>Up to 100 names. Entries are saved to the shared event log.</small></form>` : ""}
     ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="invite-form"><label for="invite-name">Invite someone to this ledger</label><div class="input-row"><input id="invite-name" name="name" maxlength="80" placeholder="Participant name" required><select name="role"><option value="member">Participant</option><option value="witness">Read-only witness</option></select><button class="button button-quiet" type="submit">Create invite link</button></div><output id="invite-link" aria-live="polite"></output></form>` : ""}
+    ${!current.archived && canAdmin && current.members.length ? `<form class="form-panel inline-form" id="group-form"><label for="group-name">Create a temporary subgroup</label><div class="input-row"><input id="group-name" name="name" maxlength="80" placeholder="e.g. Museum afternoon" required><button class="button button-quiet" type="submit">Create subgroup</button></div><fieldset class="beneficiary-fieldset"><legend>Participants</legend><div class="check-grid">${current.members.map((member) => `<label class="check-row"><input type="checkbox" name="groupMember" value="${h(member.id)}"><span>${h(member.name)}</span></label>`).join("")}</div></fieldset></form>` : ""}
+    ${current.groups.length ? `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">TEMPORARY PARTIES</div><h2>Subgroups</h2></div><span class="count">${current.groups.length} groups</span></div><div class="member-list">${current.groups.map((group) => `<article class="member-row"><span class="avatar">◌</span><span class="member-name"><b>${h(group.name)}</b><small>${group.memberIds.map((id) => h(memberName(id))).join(", ")}</small></span></article>`).join("")}</div></section>` : ""}
     <section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PRESENT</div><h2>Participants <span class="count">${current.members.length} / 100</span></h2></div></div>${current.members.length ? `<div class="member-list full-list">${current.members.map((m) => memberCard(m, current)).join("")}</div>` : emptyState("No reflections yet.", "Add the first participant to begin.", "#members", "Add a participant")}</section>`;
 }
 
@@ -78,15 +80,17 @@ function expensePage(current) {
   const payerOptions = current.members.filter((member) => access.role !== "member" || member.id === access.memberId);
   const enough = current.members.length >= 1;
   const rows = current.members.map((m) => `<label class="check-row"><input type="checkbox" name="beneficiary" value="${h(m.id)}" checked><span>${h(m.name)}</span></label>`).join("");
+  const groupOptions = current.groups.map((group) => `<option value="${h(group.id)}">${h(group.name)}</option>`).join("");
   return `${header("The Black Telephone", "Every expense leaves a trace. Every share has a rule.", "CHAMBER 02 · THE EVIDENCE")}
     <section class="feature-card phone-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/black-telephone.png" alt=""></div><div><div class="eyebrow">THE RECEIPT IS EVIDENCE</div><h2>Enter what happened.</h2><p>Receipt analysis proposes details for a person to review. It never writes into the ledger by itself.</p></div><span class="coming-tag">HUMAN REVIEW</span></section>
     ${!current.archived && !readOnly ? `<section class="form-panel"><label for="receipt-image">Receipt image</label><div class="input-row"><input id="receipt-image" type="file" accept="image/jpeg,image/png,image/webp"><button class="button button-quiet" id="analyze-receipt" type="button">Propose receipt details</button></div><pre id="receipt-proposal" hidden aria-live="polite"></pre></section>` : ""}
-    ${!enough ? emptyState("The table is empty.", "Enter at least one participant before recording a cost.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect the expenses and their evidence." : "Start another ledger to record new expenses."}</p></div></div>` : `<form class="form-panel expense-form" id="expense-form"><div class="form-heading"><div><div class="eyebrow">A NEW ENTRY</div><h2>Record an expense</h2></div><span class="form-index">02 / 05</span></div><div class="field-grid"><label>Description<input name="description" maxlength="120" placeholder="Dinner, train tickets…" required></label><label>Total amount <span class="field-hint">USD</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label><label>Paid by<select name="payer" required><option value="unassigned">Unknown / unassigned</option>${payerOptions.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("")}</select></label><label>Allocation rule<select name="splitMode" id="split-mode"><option value="equal">Split equally</option><option value="custom">Enter each share</option></select></label></div><fieldset class="beneficiary-fieldset"><legend>Who benefited from this expense?</legend><div class="check-grid">${rows}</div></fieldset><div id="custom-shares" class="custom-shares" hidden></div><div class="form-footer"><p>Shares reconcile to the total. If the payer is unknown, the expense stays unassigned until corrected.</p><button class="button button-gold" type="submit">Write into the ledger <span>↗</span></button></div></form>`}
+    ${!enough ? emptyState("The table is empty.", "Enter at least one participant before recording a cost.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect the expenses and their evidence." : "Start another ledger to record new expenses."}</p></div></div>` : `<form class="form-panel expense-form" id="expense-form"><div class="form-heading"><div><div class="eyebrow">A NEW ENTRY</div><h2>Record an expense</h2></div><span class="form-index">02 / 05</span></div><div class="field-grid"><label>Description<input name="description" maxlength="120" placeholder="Dinner, train tickets…" required></label><label>Total amount <span class="field-hint">USD</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label><label>Paid by<select name="payer" required><option value="unassigned">Unknown / unassigned</option>${payerOptions.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("")}</select></label><label>Allocation rule<select name="splitMode" id="split-mode"><option value="equal">Split equally</option><option value="custom">Enter each share</option></select></label>${groupOptions ? `<label>Apply a subgroup<select name="group" id="expense-group"><option value="">All participants</option>${groupOptions}</select></label>` : ""}</div><fieldset class="beneficiary-fieldset"><legend>Who benefited from this expense?</legend><div class="check-grid">${rows}</div></fieldset><div id="custom-shares" class="custom-shares" hidden></div><div class="form-footer"><p>Shares reconcile to the total. If the payer is unknown, the expense stays unassigned until corrected.</p><button class="button button-gold" type="submit">Write into the ledger <span>↗</span></button></div></form>`}
     <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map(expenseRow).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>`;
 }
 
 function expenseRow(event) {
-  return `<article class="expense-row"><span class="row-icon">⌕</span><span class="expense-meta"><b>${h(event.description)}</b><small>Paid by ${h(memberName(event.payerId))} · Shared by ${event.allocations.length} participant${event.allocations.length === 1 ? "" : "s"} · ${eventDate(event.at)}</small></span><strong>${formatMoney(event.totalCents)}</strong></article>`;
+  const groupNames = (event.groupIds ?? []).map((id) => ledger().groups.find((group) => group.id === id)?.name).filter(Boolean);
+  return `<article class="expense-row"><span class="row-icon">⌕</span><span class="expense-meta"><b>${h(event.description)}</b><small>Paid by ${h(memberName(event.payerId))} · Shared by ${event.allocations.length} participant${event.allocations.length === 1 ? "" : "s"}${groupNames.length ? ` · ${groupNames.map(h).join(", ")}` : ""} · ${eventDate(event.at)}</small></span><strong>${formatMoney(event.totalCents)}</strong></article>`;
 }
 
 function eventDescription(event) {
@@ -201,6 +205,15 @@ function bindPage(current) {
     commit("MEMBER_ADDED", { memberId: crypto.randomUUID(), name }, `${name} entered the mirror.`);
   });
 
+  document.querySelector("#group-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const memberIds = data.getAll("groupMember");
+    if (!memberIds.length) return showToast("Choose at least one participant for the subgroup.");
+    const name = String(data.get("name")).trim();
+    commit("GROUP_CREATED", { groupId: crypto.randomUUID(), name, memberIds }, `Subgroup ${name} created.`);
+  });
+
   const expenseForm = document.querySelector("#expense-form");
   const custom = document.querySelector("#custom-shares");
   const modeSelect = document.querySelector("#split-mode");
@@ -211,6 +224,12 @@ function bindPage(current) {
     custom.innerHTML = enabled ? `<div class="custom-title">Enter each participant’s share</div>${checked.map((box) => `<label>${h(memberName(box.value))}<input name="share-${h(box.value)}" inputmode="decimal" placeholder="0.00" required></label>`).join("")}` : "";
   };
   modeSelect?.addEventListener("change", updateCustom);
+  document.querySelector("#expense-group")?.addEventListener("change", (event) => {
+    const group = current.groups.find((item) => item.id === event.target.value);
+    const members = new Set(group?.memberIds ?? current.members.map((member) => member.id));
+    expenseForm.querySelectorAll("[name=beneficiary]").forEach((box) => { box.checked = members.has(box.value); });
+    updateCustom();
+  });
   expenseForm?.querySelectorAll("[name=beneficiary]").forEach((box) => box.addEventListener("change", updateCustom));
   expenseForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -234,7 +253,8 @@ function bindPage(current) {
         let remainder = totalCents - base * ids.length;
         allocations = ids.map((memberId) => ({ memberId, cents: base + (remainder-- > 0 ? 1 : 0) }));
       }
-      const saved = await commit("EXPENSE_RECORDED", { description: String(data.get("description")).trim(), payerId, totalCents, allocations, evidenceIds: [...pendingEvidenceIds] }, "Expense entered into the ledger.");
+      const groupId = data.get("group");
+      const saved = await commit("EXPENSE_RECORDED", { description: String(data.get("description")).trim(), payerId, totalCents, allocations, groupIds: groupId ? [groupId] : [], evidenceIds: [...pendingEvidenceIds] }, "Expense entered into the ledger.");
       if (saved) pendingEvidenceIds = [];
     } catch (error) { showToast(error.message); }
   });
