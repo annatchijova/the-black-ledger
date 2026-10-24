@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#100e0d">
+    <meta name="description" content="A surreal shared-expense ledger. Every balance has a record.">
+    <title>The Black Ledger</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/src/app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="masthead">
+        <a class="brand" href="#home" aria-label="The Black Ledger home">
+          <span class="brand-mark" aria-hidden="true">▤</span>
+          <span><strong>The Black Ledger</strong><small>Where every debt leaves a trace</small></span>
+        </a>
+        <div class="masthead-right"><span class="local-badge"><i></i> LOCAL LEDGER</span><span class="icon-button" aria-label="Interface language: English">EN</span></div>
+      </header>
+
+      <div id="storage-error" class="storage-error" role="alert" hidden></div>
+
+      <main class="layout" id="application">
+        <aside class="rail" aria-label="Ledger chambers">
+          <div class="rail-label">The Chambers</div>
+          <nav id="main-nav" class="main-nav">
+            <a class="nav-link active" href="#home" data-route="home"><span class="nav-icon">◈</span><span><b>The Ledger</b><small>Session overview</small></span></a>
+            <a class="nav-link" href="#members" data-route="members"><span class="nav-icon">◉</span><span><b>The Broken Mirror</b><small>Those bound by debt</small></span></a>
+            <a class="nav-link" href="#expenses" data-route="expenses"><span class="nav-icon">⌕</span><span><b>The Black Telephone</b><small>Evidence of spending</small></span></a>
+            <a class="nav-link" href="#history" data-route="history"><span class="nav-icon">▤</span><span><b>Memory Extraction</b><small>Events that remain</small></span></a>
+            <a class="nav-link" href="#payments" data-route="payments"><span class="nav-icon">♢</span><span><b>The Elixir</b><small>Record a settlement</small></span></a>
+            <a class="nav-link" href="#verdict" data-route="verdict"><span class="nav-icon">⚖</span><span><b>The Verdict</b><small>How balance is restored</small></span></a>
+          </nav>
+          <div class="rail-note"><span class="note-glyph">✳</span><p>AI may interpret.<br>People confirm.<br>The ledger calculates.</p></div>
+          <div class="rail-footer">A private ledger on this device</div>
+        </aside>
+
+        <section class="workspace">
+          <div id="view" aria-live="polite"></div>
+          <footer class="page-footer"><span>THE BLACK LEDGER <b>·</b> AN ACCOUNT OF SHARED THINGS</span><button id="export-button" class="text-button" type="button">Export ledger data</button></footer>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <form method="dialog"><button class="dialog-close" aria-label="Close">×</button></form>
+      <div class="eyebrow">A final entry</div><h2>Archive this journey?</h2>
+      <p>The ledger will become read-only. Its events remain on this device and can still be exported.</p>
+      <div id="archive-balance-note" class="archive-note"></div>
+      <div class="dialog-actions"><button class="button button-quiet" id="cancel-archive" type="button">Keep it open</button><button class="button button-danger" id="confirm-archive" type="button">Seal the memory</button></div>
+    </dialog>
+  </body>
+</html>

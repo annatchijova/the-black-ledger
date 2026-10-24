@@ -1,128 +1,51 @@
 # The Black Ledger
 
-**Every debt has a story. Every balance deserves a verdict.**
+The Black Ledger records shared expenses as an auditable event history. Its financial engine uses integer minor units, preserves original currencies and exchange-rate evidence, and derives balances from validated events. Narrative signals are designed to observe the ledger without changing balances.
 
-*A surreal expense-sharing application where memories become records, debts become obligations, and every payment brings the ledger closer to balance.*
+## Run locally
 
-## What is The Black Ledger?
+Requires Node.js 22.5 or newer. The server uses Node's built-in SQLite module and needs no package install.
 
-The Black Ledger is an expense-sharing and debt-settlement application with a dark, surreal visual identity inspired by atmospheric mystery and point-and-click adventure games.
+```sh
+npm run dev
+```
 
-It helps groups track shared expenses, understand who owes whom, and settle outstanding balances without losing sight of how those balances were calculated.
+Open `http://127.0.0.1:4173`. Copy `.env.example` to `.env` to configure integrations. Set `LEDGER_DATA_DIR` to choose where the SQLite database is stored, `PORT` to change the port, and `HOST=0.0.0.0` when the app must accept connections from other devices.
 
-Instead of presenting financial management as another conventional dashboard, The Black Ledger turns everyday accounting into a narrative experience.
+## Current implementation
 
-A receipt becomes evidence. A payment becomes a pact. A settled balance becomes a verdict.
+- Exact money parsing, rational FX conversion with half-even rounding, and deterministic remainder allocation.
+- Versioned canonical serialization and a hash-chained SQLite event log. Writes use SQLite transactions and idempotency keys.
+- Domain events for session agreements, members and witnesses, subgroups, assigned and unassigned expenses, corrections, receipt discrepancies, confirmations, commitments, refunds, settlements, reversals, forgiveness, responsibility transfers, budgets, recurring rules, evidence, gifts, and closure states.
+- Deterministic net-settlement suggestions, hypothetical event simulation, possible-duplicate suggestions, and explicit closure blockers.
+- Evidence upload with an 8 MB bound and SHA-256 digest.
+- Session access tokens with organizer, participant, and read-only witness roles; surprise-gift descriptions are hidden from the recipient's event view.
+- Optional server-side PayPal Sandbox order and capture endpoints. Checkout is restricted to an outstanding obligation owed to the configured merchant participant. The server derives amounts and posts a settlement only after a completed capture.
+- Optional receipt proposals from the OpenAI Responses API. The returned extraction is a proposal and requires manual review.
 
-**Behind the atmosphere, the accounting must remain precise, explainable, and auditable.**
+## API outline
 
-## The Five Chambers
+- `GET /api/health`
+- `POST /api/sessions` with `{ "name": "Weekend", "baseCurrency": "USD" }`
+- `GET /api/sessions/:sessionId` with the returned organizer token as a Bearer token
+- `POST /api/sessions/:sessionId/invitations` with `{ "name": "Alex", "role": "member" }`; returns a private invite path and access token
+- `POST /api/sessions/:sessionId/carry-debt` to carry one full, verified obligation from another same-currency session without duplicating it
+- `POST /api/sessions/:sessionId/events` with a Bearer token, an `Idempotency-Key` header, and `{ "event": { ... } }`
+- `POST /api/sessions/:sessionId/evidence` with `{ "mediaType": "image/jpeg", "dataBase64": "..." }`
+- `GET /api/sessions/:sessionId/export` for the event log, event proofs, and attached evidence
+- `POST /api/sessions/:sessionId/analysis/receipt` with `{ "mediaType": "image/jpeg", "dataBase64": "..." }`
+- `POST /api/sessions/:sessionId/simulate` with `{ "proposedEvents": [ ... ] }`; this endpoint never writes events
+- `POST /api/sessions/:sessionId/payments` with `{ "fromMemberId": "...", "toMemberId": "..." }` to create an order for an existing obligation
+- `POST /api/sessions/:sessionId/payments/:orderId/capture` after buyer approval
 
-### The Broken Mirror — Participants
+PayPal configuration is server-side: `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_MERCHANT_ID`, and `PAYPAL_PAYEE_MEMBER_ID`. The default API host is the PayPal Sandbox; `PAYPAL_BASE_URL` can override it for a controlled environment. Receipt proposals need `OPENAI_API_KEY`; `OPENAI_RECEIPT_MODEL` selects the model. Never put credentials in browser code.
 
-*Reflections of those bound by debt.*
+An exported evidence package can be checked offline with `node src/verify-package.js <evidence-package.json>`.
 
-Manage the people participating in a shared financial experience: adding and managing participants, viewing individual balances, and understanding each person's position within the group.
+## Financial boundaries
 
-### The Black Telephone — Expenses
-
-*Every expense leaves a trace.*
-
-Register shared expenses, identify who paid, and determine who participated.
-
-AI-assisted receipt interpretation will allow uploading a photograph and reviewing extracted items, quantities, and prices before adding them to the ledger. Manual expense entry will remain available.
-
-### Memory Extraction — History
-
-*The past is never truly gone.*
-
-Explore previous sessions, expenses, payments, and settlement records, preserving the context necessary to understand how a balance was produced and how it changed over time.
-
-### The Elixir — Payments
-
-*Some debts can only be settled.*
-
-Record settlements and integrate payment-provider flows to initiate and verify payment operations. An initiated payment will never be treated as a completed settlement without appropriate confirmation.
-
-### The Verdict — Calculation
-
-*The final judgment has been rendered.*
-
-Calculate each participant's financial position and present the obligations required to restore balance, using exact monetary arithmetic, explicit allocation rules, and verifiable accounting invariants, independent of the AI system.
-
-When all obligations have been satisfied: **the balance is restored.**
-
-## AI-Assisted Receipt Interpretation
-
-The AI component is intended to reduce manual data entry, not to make financial decisions on behalf of users.
-
-The proposed workflow is:
-
-1. Upload a photograph or screenshot of a receipt.
-2. Extract candidate line items, quantities, prices, and applicable charges.
-3. Present the extracted information for human review and correction.
-4. Assign expenses to the relevant participants.
-5. Calculate each participant's share deterministically.
-6. Confirm the resulting obligations before initiating payments.
-
-Ambiguous or unreadable information must remain explicitly unresolved until corrected or confirmed.
-
-**AI interprets. People confirm. The ledger calculates.**
-
-## Financial Integrity
-
-The Black Ledger is designed around several principles:
-
-- **Exact arithmetic:** Monetary calculations must not depend on binary floating-point approximations.
-- **Conservation of value:** Allocated amounts must reconcile with the recorded expense total.
-- **Explicit consent:** AI-generated interpretations and payment operations require appropriate user confirmation.
-- **Traceability:** Financial events should be attributable to their source and subsequent changes.
-- **Idempotent payment handling:** Repeated requests or notifications must not produce duplicate settlement effects.
-- **Verified settlement:** A pending, failed, or cancelled payment must not be reported as completed.
-- **Separation of concerns:** AI extraction, accounting logic, and payment processing must remain independently testable.
-
-## Beyond Equal Splitting
-
-Not every shared expense should be divided equally. The planned calculation model will support scenarios such as:
-
-- Equal splitting among selected participants.
-- Item-level assignment based on actual consumption.
-- Shared items consumed by subsets of the group.
-- Unequal contributions and partial settlements.
-- Taxes, tips, discounts, and rounding adjustments.
-- Multiple expenses paid by different participants.
-- Net obligations derived from the group's complete expense history.
-
-All allocation and rounding rules will be explicit and testable.
-
-## The Experience
-
-The Black Ledger combines practical financial workflows with a distinctive interactive world.
-
-Its visual direction includes aged gold, deep black, muted sepia, crimson accents, antique typography, symbolic objects, and atmospheric transitions: a black cube, a rotary telephone, an elixir bottle, mirrors, and other narrative elements, kept accessible and usable.
-
-Hidden details, unusual numerical events, and optional visual effects may reward exploration, but they must never alter financial results or obstruct essential operations.
-
-All visual assets and implementation are original.
-
-## Project Status
-
-**Status: Early design and planning.**
-
-The following are planned, not yet claimed as implemented in this repository:
-
-- Application interface and interactive objects.
-- Deterministic expense-allocation and settlement engine.
-- AI-assisted receipt extraction with human confirmation.
-- Payment-provider integration.
-- Persistent sessions and financial event history.
-- Auditability, automated tests, and reproducible setup.
-- A functional end-to-end demonstration.
+Receipt interpretation and scenario language can only produce proposals. A person must review proposed financial facts before recording them. Pending or claimed payments do not reduce debt. Corrections, forgiveness, and responsibility changes are distinct events. Simulations do not append events. A final close reports unresolved records instead of hiding them.
 
 ## License
 
-License to be determined before the first public release.
-
----
-
-*The cube remembers. The ledger never forgets.*
+MIT. See [LICENSE](LICENSE).

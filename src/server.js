@@ -1,0 +1,354 @@
+import http from "node:http";
+import { createReadStream, existsSync, mkdirSync } from "node:fs";
+import { createHash, randomUUID, randomBytes } from "node:crypto";
+import { dirname, extname, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
+import { canonicalStringify } from "./domain/canonical.js";
+import { deriveNarrativeEvents, narrativePattern } from "./domain/narrative.js";
+import { deriveLedger, parseEventLog, parseAmountToMinor, simulateLedger, findPossibleDuplicates } from "./domain.js";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+if (existsSync(resolve(root, ".env")) && typeof process.loadEnvFile === "function") process.loadEnvFile(resolve(root, ".env"));
+const dataPath = resolve(process.env.LEDGER_DATA_DIR ?? resolve(root, "data"));
+mkdirSync(dataPath, { recursive: true });
+const db = new DatabaseSync(resolve(dataPath, "ledger.sqlite"));
+db.exec(`PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, base_currency TEXT NOT NULL, created_at TEXT NOT NULL, event_count INTEGER NOT NULL DEFAULT 0, head_hash TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS events (session_id TEXT NOT NULL REFERENCES sessions(id), sequence INTEGER NOT NULL, event_id TEXT NOT NULL, event_json TEXT NOT NULL, previous_hash TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY(session_id, sequence), UNIQUE(session_id, event_id));
+CREATE TABLE IF NOT EXISTS requests (session_id TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(session_id, request_id));
+CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), sha256 TEXT NOT NULL, media_type TEXT NOT NULL, byte_length INTEGER NOT NULL, content BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS session_tokens (token_hash TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), role TEXT NOT NULL, member_id TEXT, created_at TEXT NOT NULL, revoked_at TEXT);
+CREATE TABLE IF NOT EXISTS paypal_orders (order_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, status TEXT NOT NULL, capture_id TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS session_patterns (session_id TEXT PRIMARY KEY REFERENCES sessions(id), pattern TEXT NOT NULL, recorded_at TEXT NOT NULL);
+`);
+
+const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml", ".json": "application/json" };
+const send = (res, status, body, headers = {}) => { res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers }); res.end(JSON.stringify(body)); };
+const sha = (value) => createHash("sha256").update(value).digest("hex");
+
+function paypalConfig() {
+  const clientId = process.env.PAYPAL_CLIENT_ID; const secret = process.env.PAYPAL_CLIENT_SECRET;
+  if (!clientId || !secret || !process.env.PAYPAL_MERCHANT_ID || !process.env.PAYPAL_PAYEE_MEMBER_ID) throw Object.assign(new Error("PayPal Sandbox credentials and the organizer payee mapping are not configured on the server."), { status: 503 });
+  return { clientId, secret, base: process.env.PAYPAL_BASE_URL ?? "https://api-m.sandbox.paypal.com", payee: process.env.PAYPAL_MERCHANT_ID, payeeMemberId: process.env.PAYPAL_PAYEE_MEMBER_ID };
+}
+
+async function paypalRequest(path, options = {}) {
+  const config = paypalConfig();
+  const auth = Buffer.from(`${config.clientId}:${config.secret}`).toString("base64");
+  const tokenResponse = await fetch(`${config.base}/v1/oauth2/token`, { method: "POST", headers: { authorization: `Basic ${auth}`, "content-type": "application/x-www-form-urlencoded" }, body: "grant_type=client_credentials", signal: AbortSignal.timeout(12_000) });
+  if (!tokenResponse.ok) throw Object.assign(new Error("PayPal authentication failed."), { status: 502 });
+  const token = await tokenResponse.json();
+  const response = await fetch(`${config.base}${path}`, { ...options, headers: { authorization: `Bearer ${token.access_token}`, "content-type": "application/json", ...(options.headers ?? {}) }, signal: AbortSignal.timeout(20_000) });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(`PayPal request failed with status ${response.status}.`), { status: 502 });
+  return result;
+}
+
+async function readJson(req, maxBytes = 1_000_000) {
+  let length = 0; const chunks = [];
+  for await (const chunk of req) { length += chunk.length; if (length > maxBytes) throw Object.assign(new Error("Request body is too large."), { status: 413 }); chunks.push(chunk); }
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  catch { throw Object.assign(new Error("Request body must be valid JSON."), { status: 400 }); }
+}
+
+function getEvents(sessionId) {
+  const rows = db.prepare("SELECT sequence, event_json, previous_hash, content_hash FROM events WHERE session_id = ? ORDER BY sequence").all(sessionId);
+  let previous = "";
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]; const event = JSON.parse(row.event_json);
+    if (row.sequence !== i + 1 || row.previous_hash !== previous || sha(`${previous}\n${canonicalStringify(event)}`) !== row.content_hash) throw new Error("The stored event chain failed integrity verification.");
+    previous = row.content_hash;
+  }
+  return { events: rows.map((row) => JSON.parse(row.event_json)), proofs: rows.map((row) => ({ sequence: row.sequence, previousHash: row.previous_hash, contentHash: row.content_hash })), headHash: previous };
+}
+
+function append(sessionId, event, requestId, { trustedProvider = false } = {}) {
+  const session = db.prepare("SELECT id, base_currency, event_count, head_hash FROM sessions WHERE id = ?").get(sessionId);
+  if (!session) throw Object.assign(new Error("Session not found."), { status: 404 });
+  const fingerprint = sha(canonicalStringify(event));
+  if (event.type === "SETTLEMENT_RECORDED") throw Object.assign(new Error("Legacy settlement assertions cannot be appended through the shared API."), { status: 422 });
+  if (event.type === "SETTLEMENT_CONFIRMED" && event.confirmationSource === "provider_capture" && !trustedProvider) throw Object.assign(new Error("Provider-confirmed payments can only be recorded by the server capture flow."), { status: 403 });
+  const priorRequest = db.prepare("SELECT fingerprint, response_json FROM requests WHERE session_id = ? AND request_id = ?").get(sessionId, requestId);
+  if (priorRequest) {
+    if (priorRequest.fingerprint !== fingerprint) throw Object.assign(new Error("This idempotency key was already used for a different event."), { status: 409 });
+    return JSON.parse(priorRequest.response_json);
+  }
+  const current = getEvents(sessionId);
+  const candidate = parseEventLog([...current.events, event], session.base_currency);
+  const next = deriveLedger(candidate, { baseCurrency: session.base_currency });
+  const sequence = session.event_count + 1;
+  const contentHash = sha(`${session.head_hash}\n${canonicalStringify(event)}`);
+  const response = { event, sequence, previousHash: session.head_hash, contentHash, headHash: contentHash, state: publicState(next) };
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const actual = db.prepare("SELECT event_count, head_hash FROM sessions WHERE id = ?").get(sessionId);
+    if (actual.event_count !== session.event_count || actual.head_hash !== session.head_hash) throw Object.assign(new Error("Session changed concurrently; reload before retrying."), { status: 409 });
+    db.prepare("INSERT INTO events(session_id, sequence, event_id, event_json, previous_hash, content_hash) VALUES (?, ?, ?, ?, ?, ?)").run(sessionId, sequence, event.id, JSON.stringify(event), session.head_hash, contentHash);
+    db.prepare("UPDATE sessions SET event_count = ?, head_hash = ? WHERE id = ?").run(sequence, contentHash, sessionId);
+    db.prepare("INSERT INTO requests(session_id, request_id, fingerprint, response_json, created_at) VALUES (?, ?, ?, ?, ?)").run(sessionId, requestId, fingerprint, JSON.stringify(response), new Date().toISOString());
+    if (event.type === "SESSION_CLOSED_FINAL") db.prepare("INSERT INTO session_patterns(session_id, pattern, recorded_at) VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET pattern = excluded.pattern, recorded_at = excluded.recorded_at").run(sessionId, narrativePattern(next), event.at);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return response;
+}
+
+function publicState(ledger) {
+  return {
+    session: ledger.session,
+    members: ledger.members,
+    groups: ledger.groups,
+    expenses: ledger.expenses,
+    settlements: ledger.settlements,
+    commitments: ledger.commitments,
+    discrepancies: ledger.discrepancies,
+    balances: Object.fromEntries(ledger.balances),
+    outstanding: ledger.outstanding,
+    totalExpensesMinor: ledger.totalExpensesMinor,
+    closure: ledger.closure,
+    closureBlockers: ledger.closureBlockers,
+    narrativeEvents: deriveNarrativeEvents(ledger, { priorLedgers: ledger.session ? db.prepare("SELECT pattern FROM session_patterns WHERE session_id <> ? ORDER BY recorded_at DESC LIMIT 100").all(ledger.session.id) : [] }),
+    archived: ledger.archived
+  };
+}
+
+async function route(req, res) {
+  const url = new URL(req.url, "http://localhost");
+  if (req.method === "GET" && url.pathname === "/api/health") return send(res, 200, { ok: true, storage: "sqlite", apiVersion: 1 });
+  if (req.method === "POST" && url.pathname === "/api/sessions") {
+    const body = await readJson(req, 16_000); const sessionId = body.sessionId ?? randomUUID().replaceAll("-", "");
+    const accessToken = randomBytes(32).toString("base64url");
+    const currency = String(body.baseCurrency ?? "USD").toUpperCase();
+    const createdAt = new Date().toISOString();
+    const createEvent = { id: randomUUID().replaceAll("-", ""), at: createdAt, type: "SESSION_CREATED", sessionId, name: body.name, baseCurrency: currency };
+    parseEventLog([createEvent], currency); deriveLedger([createEvent], { baseCurrency: currency });
+    db.prepare("INSERT INTO sessions(id, base_currency, created_at) VALUES (?, ?, ?)").run(sessionId, currency, createdAt);
+    db.prepare("INSERT INTO session_tokens(token_hash, session_id, role, created_at) VALUES (?, ?, 'organizer', ?)").run(sha(accessToken), sessionId, createdAt);
+    const response = append(sessionId, createEvent, `create:${sessionId}`);
+    return send(res, 201, { sessionId, accessToken, ...response });
+  }
+  const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,100})(?:\/(events|evidence|export|analysis\/(?:receipt|scenario)|simulate|invitations|carry-debt|payments(?:\/[A-Z0-9-]+\/capture)?))?$/.exec(url.pathname);
+  if (match) {
+    const [, sessionId, resource] = match;
+    const session = db.prepare("SELECT id, base_currency FROM sessions WHERE id = ?").get(sessionId);
+    if (!session) return send(res, 404, { error: "Session not found." });
+    const bearer = /^Bearer ([A-Za-z0-9_-]{32,100})$/.exec(req.headers.authorization ?? "")?.[1];
+    const access = bearer ? db.prepare("SELECT role, member_id FROM session_tokens WHERE token_hash = ? AND session_id = ? AND revoked_at IS NULL").get(sha(bearer), sessionId) : null;
+    if (!access) return send(res, 401, { error: "A valid session access token is required." });
+    if (req.method === "POST" && ["events", "payments", "evidence", "invitations"].includes((resource ?? "").split("/")[0]) && access.role === "witness") return send(res, 403, { error: "Witness access is read-only." });
+    if (req.method === "GET" && (!resource || resource === "events")) {
+      const { events, headHash } = getEvents(sessionId); const ledger = deriveLedger(events, { baseCurrency: session.base_currency });
+      const visibleEvents = events.map((event) => event.type === "SURPRISE_GIFT_RECORDED" && event.recipientMemberId === access.member_id ? { ...event, privateDescription: "[hidden from recipient]" } : event);
+      return send(res, 200, { sessionId, baseCurrency: session.base_currency, access: { role: access.role, memberId: access.member_id }, events: visibleEvents, headHash, state: publicState(ledger) });
+    }
+    if (req.method === "GET" && resource === "export") {
+      if (access.role !== "organizer") return send(res, 403, { error: "Only the organizer can export the complete evidence package." });
+      const chain = getEvents(sessionId);
+      const rows = db.prepare("SELECT id, sha256, media_type, byte_length, content FROM evidence WHERE session_id = ? ORDER BY id").all(sessionId);
+      const attachments = rows.map((row) => ({ id: row.id, sha256: row.sha256, mediaType: row.media_type, byteLength: row.byte_length, dataBase64: Buffer.from(row.content).toString("base64") }));
+      const manifest = { format: "the-black-ledger-evidence-package", version: 1, sessionId, baseCurrency: session.base_currency, events: chain.events, eventProofs: chain.proofs, eventHeadHash: chain.headHash, evidence: attachments.map(({ dataBase64, ...metadata }) => metadata), evidenceData: attachments };
+      const packageHash = sha(canonicalStringify(manifest));
+      return send(res, 200, { ...manifest, packageHash, verification: { algorithm: "SHA-256", canonicalization: "The Black Ledger v1", verifiesContent: true } });
+    }
+    if (req.method === "POST" && resource === "invitations") {
+      if (access.role !== "organizer") return send(res, 403, { error: "Only the organizer can invite participants." });
+      const body = await readJson(req, 16_000);
+      if (!new Set(["member", "witness"]).has(body.role)) return send(res, 400, { error: "Invite role must be member or witness." });
+      const memberId = randomUUID().replaceAll("-", ""); const token = randomBytes(32).toString("base64url");
+      const event = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "MEMBER_INVITED", memberId, name: body.name, role: body.role };
+      const created = append(sessionId, event, `invite-${event.id}`);
+      db.prepare("INSERT INTO session_tokens(token_hash, session_id, role, member_id, created_at) VALUES (?, ?, ?, ?, ?)").run(sha(token), sessionId, body.role, memberId, event.at);
+      return send(res, 201, { memberId, role: body.role, accessToken: token, invitePath: `/#join/${sessionId}/${token}`, event: created.event, state: created.state });
+    }
+    if (req.method === "POST" && resource === "carry-debt") {
+      if (access.role !== "organizer") return send(res, 403, { error: "Only the organizer can carry obligations between sessions." });
+      const body = await readJson(req, 16_000);
+      const requestId = req.headers["idempotency-key"];
+      if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,120}$/.test(requestId)) return send(res, 400, { error: "A valid Idempotency-Key header is required." });
+      if (body.originSessionId === sessionId) return send(res, 400, { error: "Choose a different origin session." });
+      const origin = db.prepare("SELECT id, base_currency, event_count, head_hash FROM sessions WHERE id = ?").get(body.originSessionId);
+      if (!origin) return send(res, 404, { error: "Origin session not found." });
+      const originToken = req.headers["x-origin-token"];
+      const originAccess = typeof originToken === "string" ? db.prepare("SELECT role FROM session_tokens WHERE token_hash = ? AND session_id = ? AND revoked_at IS NULL").get(sha(originToken), origin.id) : null;
+      if (originAccess?.role !== "organizer") return send(res, 403, { error: "An organizer token for the origin session is required." });
+      if (origin.base_currency !== session.base_currency) return send(res, 422, { error: "Carry obligations between sessions with the same base currency so the amount is not reinterpreted." });
+      const fingerprint = sha(canonicalStringify(body));
+      const previousRequest = db.prepare("SELECT fingerprint, response_json FROM requests WHERE session_id = ? AND request_id = ?").get(sessionId, requestId);
+      if (previousRequest) {
+        if (previousRequest.fingerprint !== fingerprint) return send(res, 409, { error: "This idempotency key was used for a different carry operation." });
+        return send(res, 200, JSON.parse(previousRequest.response_json));
+      }
+      const originChain = getEvents(origin.id); const targetSession = db.prepare("SELECT id, base_currency, event_count, head_hash FROM sessions WHERE id = ?").get(sessionId);
+      const targetChain = getEvents(sessionId);
+      const originLedger = deriveLedger(originChain.events, { baseCurrency: origin.base_currency });
+      const originDue = originLedger.outstanding.find((item) => item.debtorId === body.sourceDebtorId && item.creditorId === body.sourceCreditorId)?.amountMinor ?? 0;
+      const amountMinor = body.amountMinor;
+      if (!Number.isSafeInteger(amountMinor) || amountMinor < 1 || amountMinor !== originDue) return send(res, 409, { error: "Carry the full current obligation once; partial carries could duplicate the remaining origin balance.", outstandingMinor: originDue });
+      const targetLedger = deriveLedger(targetChain.events, { baseCurrency: session.base_currency });
+      if (!targetLedger.members.some((member) => member.id === body.debtorId) || !targetLedger.members.some((member) => member.id === body.creditorId)) return send(res, 422, { error: "Map the carried obligation to participants already in the new session." });
+      const originObligationId = `carry_${sha(`${origin.id}:${body.sourceDebtorId}:${body.sourceCreditorId}`)}`;
+      if (targetLedger.carriedObligations.some((item) => item.originSessionId === origin.id && item.originObligationId === originObligationId)) return send(res, 409, { error: "This origin obligation has already been carried into this session." });
+      const transferId = `transfer_${sha(`${sessionId}:${origin.id}:${requestId}`).slice(0, 40)}`; const at = new Date().toISOString();
+      const outbound = { id: `carryout_${sha(transferId).slice(0, 32)}`, at, type: "OBLIGATION_CARRIED_OUT", targetSessionId: sessionId, transferId, debtorId: body.sourceDebtorId, creditorId: body.sourceCreditorId, amountMinor };
+      const inbound = { id: `carryin_${sha(transferId).slice(0, 32)}`, at, type: "OBLIGATION_CARRIED", originSessionId: origin.id, originObligationId, sourceDebtorId: body.sourceDebtorId, sourceCreditorId: body.sourceCreditorId, debtorId: body.debtorId, creditorId: body.creditorId, amountMinor };
+      const originEvents = parseEventLog([...originChain.events, outbound], origin.base_currency);
+      const targetEvents = parseEventLog([...targetChain.events, inbound], targetSession.base_currency);
+      const originNext = deriveLedger(originEvents, { baseCurrency: origin.base_currency });
+      const targetNext = deriveLedger(targetEvents, { baseCurrency: targetSession.base_currency });
+      const originHash = sha(`${origin.head_hash}\n${canonicalStringify(outbound)}`); const targetHash = sha(`${targetSession.head_hash}\n${canonicalStringify(inbound)}`);
+      const response = { transferId, source: { sessionId: origin.id, event: outbound, headHash: originHash, state: publicState(originNext) }, destination: { sessionId, event: inbound, headHash: targetHash, state: publicState(targetNext) } };
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const currentSource = db.prepare("SELECT event_count, head_hash FROM sessions WHERE id = ?").get(origin.id);
+        const currentTarget = db.prepare("SELECT event_count, head_hash FROM sessions WHERE id = ?").get(sessionId);
+        if (currentSource.event_count !== origin.event_count || currentSource.head_hash !== origin.head_hash || currentTarget.event_count !== targetSession.event_count || currentTarget.head_hash !== targetSession.head_hash) throw Object.assign(new Error("One of the ledgers changed concurrently; reload before retrying."), { status: 409 });
+        db.prepare("INSERT INTO events(session_id, sequence, event_id, event_json, previous_hash, content_hash) VALUES (?, ?, ?, ?, ?, ?)").run(origin.id, origin.event_count + 1, outbound.id, JSON.stringify(outbound), origin.head_hash, originHash);
+        db.prepare("INSERT INTO events(session_id, sequence, event_id, event_json, previous_hash, content_hash) VALUES (?, ?, ?, ?, ?, ?)").run(sessionId, targetSession.event_count + 1, inbound.id, JSON.stringify(inbound), targetSession.head_hash, targetHash);
+        db.prepare("UPDATE sessions SET event_count = event_count + 1, head_hash = ? WHERE id = ?").run(originHash, origin.id);
+        db.prepare("UPDATE sessions SET event_count = event_count + 1, head_hash = ? WHERE id = ?").run(targetHash, sessionId);
+        db.prepare("INSERT INTO requests(session_id, request_id, fingerprint, response_json, created_at) VALUES (?, ?, ?, ?, ?)").run(sessionId, requestId, fingerprint, JSON.stringify(response), at);
+        db.prepare("INSERT INTO requests(session_id, request_id, fingerprint, response_json, created_at) VALUES (?, ?, ?, ?, ?)").run(origin.id, requestId, fingerprint, JSON.stringify(response), at);
+        db.exec("COMMIT");
+      } catch (error) { db.exec("ROLLBACK"); throw error; }
+      return send(res, 201, response);
+    }
+    if (req.method === "POST" && resource === "analysis/receipt") {
+      const body = await readJson(req, 11_000_000);
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey) return send(res, 503, { error: "Receipt proposal service is not configured." });
+      if (typeof body.dataBase64 !== "string" || body.dataBase64.length > 10_700_000) return send(res, 413, { error: "Receipt image exceeds the 8 MB limit." });
+      const mediaType = String(body.mediaType ?? "");
+      if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(mediaType)) return send(res, 415, { error: "Upload a JPEG, PNG, or WebP receipt image." });
+      const image = Buffer.from(body.dataBase64, "base64");
+      if (!image.length || image.length > 8_000_000 || image.toString("base64").replace(/=+$/, "") !== body.dataBase64.replace(/=+$/, "")) return send(res, 400, { error: "Receipt image encoding is invalid or exceeds the 8 MB limit." });
+      const schema = { type: "object", additionalProperties: false, required: ["merchant", "date", "currency", "total", "items", "uncertainties"], properties: { merchant: { type: ["string", "null"] }, date: { type: ["string", "null"] }, currency: { type: ["string", "null"] }, total: { type: ["string", "null"] }, items: { type: "array", items: { type: "object", additionalProperties: false, required: ["description", "quantity", "amount", "confidence"], properties: { description: { type: "string" }, quantity: { type: ["string", "null"] }, amount: { type: ["string", "null"] }, confidence: { type: "number" } } } }, uncertainties: { type: "array", items: { type: "string" } } } };
+      const aiResponse = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: process.env.OPENAI_RECEIPT_MODEL ?? "gpt-4.1-mini", store: false, input: [{ role: "user", content: [{ type: "input_text", text: "Extract only facts visible on this receipt. Preserve decimal strings exactly. Do not infer missing values. Mark ambiguity in uncertainties. This is a proposal for human review and will not be recorded automatically." }, { type: "input_image", image_url: `data:${mediaType};base64,${body.dataBase64}` }] }], text: { format: { type: "json_schema", name: "receipt_proposal", strict: true, schema } } }), signal: AbortSignal.timeout(40_000) });
+      if (!aiResponse.ok) return send(res, 502, { error: "Receipt analysis provider returned an error." });
+      const result = await aiResponse.json();
+      const outputText = result.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text")?.text;
+      if (!outputText) return send(res, 502, { error: "Receipt analysis returned no structured proposal." });
+      let proposal;
+      try { proposal = JSON.parse(outputText); } catch { return send(res, 502, { error: "Receipt analysis returned invalid structured data." }); }
+      return send(res, 200, { proposal, requiresHumanReview: true, recorded: false });
+    }
+    if (req.method === "POST" && resource === "analysis/scenario") {
+      const body = await readJson(req, 8_000);
+      const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+      if (!prompt || prompt.length > 1_200) return send(res, 400, { error: "Describe a scenario in 1 to 1,200 characters." });
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey) return send(res, 503, { error: "Scenario proposal service is not configured." });
+      const currentEvents = getEvents(sessionId).events;
+      const ledger = deriveLedger(currentEvents, { baseCurrency: session.base_currency });
+      const schema = { type: "object", additionalProperties: false, required: ["expenses", "uncertainties"], properties: { expenses: { type: "array", maxItems: 5, items: { type: "object", additionalProperties: false, required: ["description", "payerId", "amount", "allocations"], properties: { description: { type: "string" }, payerId: { type: "string" }, amount: { type: "string" }, allocations: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false, required: ["memberId", "amount"], properties: { memberId: { type: "string" }, amount: { type: "string" } } } } } } }, uncertainties: { type: "array", maxItems: 20, items: { type: "string" } } } };
+      const promptContext = { request: prompt, baseCurrency: session.base_currency, participants: ledger.members.map((member) => ({ id: member.id, name: member.name })), currentBalancesMinor: Object.fromEntries(ledger.balances) };
+      const aiResponse = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: process.env.OPENAI_RECEIPT_MODEL ?? "gpt-4.1-mini", store: false, max_output_tokens: 3000, input: [{ role: "user", content: [{ type: "input_text", text: `Translate the user's hypothetical into at most five proposed shared expenses. Use only participant IDs provided. Express amounts as ordinary decimal strings in ${session.base_currency}; do not calculate balances or infer missing facts. Return uncertainties when a payer, beneficiary, amount, or split is unclear. These records are simulation-only and must never be saved. Context: ${JSON.stringify(promptContext)}` }] }], text: { format: { type: "json_schema", name: "scenario_proposal", strict: true, schema } } }), signal: AbortSignal.timeout(40_000) });
+      if (!aiResponse.ok) return send(res, 502, { error: "Scenario analysis provider returned an error." });
+      const aiResult = await aiResponse.json();
+      const outputText = aiResult.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text")?.text;
+      if (!outputText) return send(res, 502, { error: "Scenario analysis returned no structured proposal." });
+      let proposal;
+      try { proposal = JSON.parse(outputText); } catch { return send(res, 502, { error: "Scenario analysis returned invalid structured data." }); }
+      const proposedEvents = proposal.expenses.map((expense) => ({ id: `simulation_${randomUUID().replaceAll("-", "")}`, at: new Date().toISOString(), type: "EXPENSE_RECORDED", expenseId: `simulation_expense_${randomUUID().replaceAll("-", "")}`, description: expense.description, paidByMemberId: expense.payerId, amountMinor: parseAmountToMinor(expense.amount, session.base_currency), baseAmountMinor: parseAmountToMinor(expense.amount, session.base_currency), currency: session.base_currency, allocations: expense.allocations.map((row) => ({ memberId: row.memberId, baseMinor: parseAmountToMinor(row.amount, session.base_currency) })) }));
+      const simulation = simulateLedger(currentEvents, proposedEvents, { baseCurrency: session.base_currency });
+      return send(res, 200, { proposal, simulation, requiresHumanReview: true, persisted: false });
+    }
+    if (req.method === "POST" && resource === "events") {
+      const requestId = req.headers["idempotency-key"];
+      if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,120}$/.test(requestId)) return send(res, 400, { error: "A valid Idempotency-Key header is required." });
+      const body = await readJson(req); const event = body.event;
+      const organizerOnly = new Set(["SETTLEMENT_REVERSED", "SETTLEMENT_STATUS_RECORDED", "SETTLEMENT_REFUNDED", "SESSION_CLOSED_PROVISIONAL", "SESSION_CLOSED_FINAL", "SESSION_REOPENED", "SESSION_ARCHIVED", "SESSION_RULES_RECORDED", "BUDGET_SET", "RECURRING_RULE_APPROVED"]);
+      if (organizerOnly.has(event?.type) && access.role !== "organizer") return send(res, 403, { error: "This ledger action is restricted to its organizer." });
+      if (event?.type === "SETTLEMENT_CONFIRMED" && event.confirmationSource === "recipient_confirmation" && access.member_id !== event.confirmedByMemberId && access.role !== "organizer") return send(res, 403, { error: "Only the recipient can confirm this payment." });
+      if (event?.type === "SETTLEMENT_CONFIRMED" && event.confirmationSource === "organizer_record" && access.role !== "organizer") return send(res, 403, { error: "Only the organizer can record this confirmation." });
+      if (event?.type === "EVIDENCE_ATTACHED") {
+        const file = db.prepare("SELECT sha256, media_type, byte_length FROM evidence WHERE id = ? AND session_id = ?").get(event.evidenceId, sessionId);
+        if (!file || file.sha256 !== event.contentHash || file.media_type !== event.mediaType || file.byte_length !== event.byteLength) return send(res, 422, { error: "Evidence event must match an uploaded file in this session." });
+      }
+      const before = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
+      const result = append(sessionId, event, requestId);
+      if (["EXPENSE_RECORDED", "EXPENSE_UNASSIGNED"].includes(event.type)) {
+        const current = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
+        result.possibleDuplicates = findPossibleDuplicates(before.expenses, current.expenses.find((expense) => expense.sourceEventId === event.id) ?? event);
+      }
+      return send(res, 201, result);
+    }
+    if (req.method === "POST" && resource === "simulate") {
+      const body = await readJson(req, 1_000_000);
+      const events = getEvents(sessionId).events;
+      const result = simulateLedger(events, body.proposedEvents, { baseCurrency: session.base_currency });
+      return send(res, 200, { ...result, persisted: false });
+    }
+    if (req.method === "POST" && resource === "payments") {
+      const body = await readJson(req, 16_000);
+      if (access.role === "member" && access.member_id !== body.fromMemberId) return send(res, 403, { error: "A participant can only create a PayPal order for their own obligation." });
+      const ledger = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
+      const due = ledger.outstanding.find((item) => item.debtorId === body.fromMemberId && item.creditorId === body.toMemberId)?.amountMinor ?? 0;
+      const claimed = ledger.pendingClaims.find((item) => item.fromMemberId === body.fromMemberId && item.toMemberId === body.toMemberId)?.amountMinor ?? 0;
+      const amount = due - claimed;
+      if (!amount || !Number.isSafeInteger(amount) || amount < 1) return send(res, 409, { error: "No confirmed outstanding obligation exists for this participant pair." });
+      if (session.base_currency !== "USD") return send(res, 422, { error: "PayPal Checkout currently requires a USD ledger session." });
+      const config = paypalConfig();
+      if (body.toMemberId !== config.payeeMemberId) return send(res, 422, { error: "PayPal Checkout can currently settle only obligations owed to the configured merchant participant." });
+      const appBase = (process.env.APP_BASE_URL ?? "http://127.0.0.1:4173").replace(/\/$/, "");
+      const order = await paypalRequest("/v2/checkout/orders", { method: "POST", headers: { "PayPal-Request-Id": `ledger-order-${randomUUID()}` }, body: JSON.stringify({ intent: "CAPTURE", purchase_units: [{ reference_id: `${sessionId}:${body.fromMemberId}:${body.toMemberId}`, description: "Shared expense settlement", amount: { currency_code: "USD", value: `${Math.floor(amount / 100)}.${String(amount % 100).padStart(2, "0")}` }, ...(config.payee ? { payee: { merchant_id: config.payee } } : {}) }], application_context: { return_url: `${appBase}/?payment=return`, cancel_url: `${appBase}/?payment=cancel`, shipping_preference: "NO_SHIPPING", user_action: "PAY_NOW" } }) });
+      if (!order.id) throw Object.assign(new Error("PayPal did not return an order ID."), { status: 502 });
+      db.prepare("INSERT INTO paypal_orders(order_id, session_id, from_member_id, to_member_id, amount_minor, status, created_at) VALUES (?, ?, ?, ?, ?, 'created', ?)").run(order.id, sessionId, body.fromMemberId, body.toMemberId, amount, new Date().toISOString());
+      return send(res, 201, { orderId: order.id, status: order.status, approvalUrl: order.links?.find((link) => link.rel === "approve")?.href, fromMemberId: body.fromMemberId, toMemberId: body.toMemberId, amountMinor: amount, currency: "USD" });
+    }
+    if (req.method === "POST" && /^payments\/[^/]+\/capture$/.test(resource ?? "")) {
+      const orderId = resource.split("/")[1];
+      if (!/^[A-Z0-9-]{5,80}$/i.test(orderId)) return send(res, 400, { error: "Invalid PayPal order ID." });
+      const storedOrder = db.prepare("SELECT * FROM paypal_orders WHERE order_id = ? AND session_id = ?").get(orderId, sessionId);
+      if (!storedOrder) return send(res, 404, { error: "PayPal order was not created for this ledger session." });
+      if (access.role === "member" && access.member_id !== storedOrder.from_member_id) return send(res, 403, { error: "A participant can only capture their own PayPal order." });
+      if (storedOrder.status === "completed" && storedOrder.capture_id) return send(res, 200, { status: "COMPLETED", orderId, captureId: storedOrder.capture_id, alreadyRecorded: true });
+      const capture = await paypalRequest(`/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, { method: "POST", headers: { "PayPal-Request-Id": `ledger-capture-${orderId}` }, body: "{}" });
+      const unit = capture.purchase_units?.[0]; const payment = unit?.payments?.captures?.[0];
+      if (capture.status !== "COMPLETED" || payment?.status !== "COMPLETED") return send(res, 202, { status: payment?.status ?? capture.status, orderId, message: "Payment remains unconfirmed in the ledger." });
+      const reference = String(unit.reference_id ?? "").split(":");
+      if (reference.length !== 3 || reference[0] !== sessionId || reference[1] !== storedOrder.from_member_id || reference[2] !== storedOrder.to_member_id) return send(res, 409, { error: "PayPal order does not match its stored ledger obligation." });
+      const [, fromMemberId, toMemberId] = reference;
+      const capturedMinor = parseAmountToMinor(payment.amount?.value, payment.amount?.currency_code);
+      const latest = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
+      const due = latest.outstanding.find((item) => item.debtorId === fromMemberId && item.creditorId === toMemberId)?.amountMinor ?? 0;
+      const claimed = latest.pendingClaims.find((item) => item.fromMemberId === fromMemberId && item.toMemberId === toMemberId)?.amountMinor ?? 0;
+      if (capturedMinor !== storedOrder.amount_minor || capturedMinor > due - claimed || payment.amount?.currency_code !== session.base_currency) return send(res, 409, { error: "Captured amount no longer fits the outstanding ledger obligation; manual reconciliation is required.", capturedMinor, availableMinor: due - claimed });
+      const occurredAt = payment.create_time ?? capture.update_time ?? new Date().toISOString();
+      const event = { id: `paypal_${payment.id}_assert`, at: occurredAt, type: "SETTLEMENT_ASSERTED", settlementId: `paypal_${payment.id}`, fromMemberId, toMemberId, amountMinor: capturedMinor, rail: "paypal" };
+      const eventId = `paypal-capture-${payment.id}`;
+      const asserted = append(sessionId, event, eventId);
+      const confirmation = { id: `paypal_${payment.id}_confirmed`, at: occurredAt, type: "SETTLEMENT_CONFIRMED", settlementId: event.settlementId, confirmedByMemberId: toMemberId, confirmationSource: "provider_capture", provider: "paypal", providerCaptureId: payment.id, providerStatus: "COMPLETED" };
+      const confirmed = append(sessionId, confirmation, `${eventId}-confirmed`, { trustedProvider: true });
+      db.prepare("UPDATE paypal_orders SET status = 'completed', capture_id = ? WHERE order_id = ? AND session_id = ?").run(payment.id, orderId, sessionId);
+      return send(res, 200, { status: "COMPLETED", orderId, captureId: payment.id, event: confirmed.event, headHash: confirmed.headHash });
+    }
+    if (req.method === "POST" && resource === "evidence") {
+      const body = await readJson(req, 11_000_000);
+      if (typeof body.dataBase64 !== "string" || body.dataBase64.length > 10_700_000) return send(res, 413, { error: "Evidence exceeds the 8 MB limit." });
+      const content = Buffer.from(body.dataBase64, "base64");
+      if (!content.length || content.length > 8_000_000 || content.toString("base64").replace(/=+$/, "") !== body.dataBase64.replace(/=+$/, "")) return send(res, 400, { error: "Evidence encoding is invalid or exceeds the 8 MB limit." });
+      const currentEvidenceBytes = db.prepare("SELECT COALESCE(SUM(byte_length), 0) AS total FROM evidence WHERE session_id = ?").get(sessionId).total;
+      if (currentEvidenceBytes + content.length > 50_000_000) return send(res, 413, { error: "A ledger can store up to 50 MB of evidence." });
+      const id = randomUUID().replaceAll("-", ""); const digest = sha(content); const mediaType = String(body.mediaType ?? "application/octet-stream").slice(0, 80);
+      db.prepare("INSERT INTO evidence(id, session_id, sha256, media_type, byte_length, content) VALUES (?, ?, ?, ?, ?, ?)").run(id, sessionId, digest, mediaType, content.length, content);
+      return send(res, 201, { id, sha256: digest, mediaType, byteLength: content.length });
+    }
+  }
+  if (req.method !== "GET" || url.pathname.startsWith("/api/")) return send(res, 404, { error: "Route not found." });
+  const requested = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
+  const file = resolve(root, requested);
+  if (!file.startsWith(`${root}${sep}`) || !existsSync(file)) return send(res, 404, { error: "Not found." });
+  res.writeHead(200, { "content-type": mime[extname(file)] ?? "application/octet-stream", "x-content-type-options": "nosniff" });
+  createReadStream(file).pipe(res);
+}
+
+const server = http.createServer((req, res) => {
+  route(req, res).catch((error) => {
+    const status = error.status ?? 400;
+    if (status >= 500) console.error("Request failed:", error.message);
+    send(res, status, { error: status >= 500 ? "Internal server error." : error.message });
+  });
+});
+const port = Number(process.env.PORT ?? 4173);
+const host = process.env.HOST ?? "127.0.0.1";
+server.listen(port, host, () => console.log(`The Black Ledger listening on http://${host}:${port}`));
