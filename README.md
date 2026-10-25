@@ -21,7 +21,7 @@ Open `http://127.0.0.1:4173`. Copy `.env.example` to `.env` to configure integra
 - Evidence upload with an 8 MB bound and SHA-256 digest.
 - Session access tokens with organizer, participant, and read-only witness roles; surprise-gift descriptions are hidden from the recipient's event view.
 - Participant expense and payment actions are constrained to the participant's own identity; only the payment recipient can confirm receipt.
-- Optional server-side PayPal Sandbox order and capture endpoints. Checkout is restricted to an outstanding obligation owed to the configured merchant participant. The server derives amounts and posts a settlement only after a completed capture.
+- Server-side PayPal Sandbox checkout through Orders v2. Checkout is restricted to an outstanding USD obligation owed to the configured merchant participant. The server reserves the amount, creates an idempotent order, and posts a settlement only after a completed capture.
 - Optional receipt proposals from the OpenAI Responses API. The returned extraction is a proposal and requires manual review.
 
 ## API outline
@@ -41,7 +41,7 @@ Open `http://127.0.0.1:4173`. Copy `.env.example` to `.env` to configure integra
 - `POST /api/sessions/:sessionId/payments/:orderId/capture` after buyer approval
 - `POST /api/sessions/:sessionId/payments/:orderId/cancel` when the buyer cancels approval
 
-PayPal configuration is server-side: `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_MERCHANT_ID`, and `PAYPAL_PAYEE_MEMBER_ID`. The default API host is the PayPal Sandbox; `PAYPAL_BASE_URL` can override it for a controlled environment. Receipt proposals need `OPENAI_API_KEY`; `OPENAI_RECEIPT_MODEL` selects the model. Never put credentials in browser code.
+PayPal Sandbox checkout uses server-side `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_MERCHANT_ID`, and `PAYPAL_PAYEE_MEMBER_ID`. Set `APP_BASE_URL` to the browser-reachable app origin used for PayPal's return and cancel URLs. The default API host is the PayPal Sandbox; `PAYPAL_BASE_URL` can override it for a controlled environment. Receipt proposals need `OPENAI_API_KEY`; `OPENAI_RECEIPT_MODEL` selects the model. Never put credentials in browser code.
 
 An exported evidence package can be checked offline with `node src/verify-package.js <evidence-package.json>`.
 
