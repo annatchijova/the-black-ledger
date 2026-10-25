@@ -1,4 +1,4 @@
-import { deriveLedger, formatMoney, parseAmountToMinor, SUPPORTED_CURRENCIES, settleUp } from "./domain.js";
+import { deriveLedger, findPossibleDuplicates, formatMoney, parseAmountToMinor, SUPPORTED_CURRENCIES, settleUp } from "./domain.js";
 import { deriveNarrativeEvents } from "./domain/narrative.js";
 import { appendEvent, exportLedger, loadLedger, takeAppendWarnings, getAccessContext } from "./store.js";
 
@@ -228,10 +228,14 @@ function expenseCurrencyDetails(data) {
 
 function expenseRow(event, current) {
   const groupNames = (event.groupIds ?? []).map((id) => current.groups.find((group) => group.id === id)?.name).filter(Boolean);
+  const expenseIndex = current.expenses.findIndex((expense) => expense.id === event.id);
+  const earlierExpenses = expenseIndex < 0 ? [] : current.expenses.slice(0, expenseIndex);
+  const possibleDuplicates = findPossibleDuplicates(earlierExpenses, event);
   const originalAmount = event.currency !== ledgerCurrency() ? ` · original ${formatMoney(event.amountMinor, event.currency)}` : "";
   const fxEvidence = event.fx ? ` · FX ${event.fx.numerator}/${event.fx.denominator} ${event.fx.targetCurrency}/${event.fx.sourceCurrency} from ${h(event.fx.source)} at ${eventDate(event.fx.observedAt)}` : "";
   const feeEvidence = event.fx?.feeMinor ? ` · conversion fee ${money(event.fx.feeMinor)} paid by ${h(current.members.find((member) => member.id === event.fx.feePayerMemberId)?.name ?? "Unknown participant")}` : "";
-  return `<article class="expense-row"><span class="row-icon">⌕</span><span class="expense-meta"><b>${h(event.description)}</b><small>Paid by ${h(current.members.find((member) => member.id === event.payerId)?.name ?? "Unknown participant")} · Shared by ${event.allocations.length} participant${event.allocations.length === 1 ? "" : "s"}${groupNames.length ? ` · ${groupNames.map(h).join(", ")}` : ""}${originalAmount}${fxEvidence}${feeEvidence} · ${eventDate(event.at)}</small></span><strong>${money(event.totalCents)}</strong>${expenseReview(event, current)}</article>`;
+  const duplicateNotice = possibleDuplicates.length ? `<div class="duplicate-notice" role="note"><b>Possible duplicate; review before relying on this entry.</b>${possibleDuplicates.map((match) => { const prior = current.expenses.find((expense) => expense.id === match.expenseId); return `<small>Similar to “${h(prior?.description ?? "expense")}” recorded ${prior ? eventDate(prior.at) : "earlier"}. ${h(match.reason)}. No entry was removed.</small>`; }).join("")}</div>` : "";
+  return `<article class="expense-row"><span class="row-icon">⌕</span><span class="expense-meta"><b>${h(event.description)}</b><small>Paid by ${h(current.members.find((member) => member.id === event.payerId)?.name ?? "Unknown participant")} · Shared by ${event.allocations.length} participant${event.allocations.length === 1 ? "" : "s"}${groupNames.length ? ` · ${groupNames.map(h).join(", ")}` : ""}${originalAmount}${fxEvidence}${feeEvidence} · ${eventDate(event.at)}</small>${duplicateNotice}</span><strong>${money(event.totalCents)}</strong>${expenseReview(event, current)}</article>`;
 }
 
 function expenseReview(expense, current) {

@@ -660,6 +660,15 @@ text-overflow:ellipsis}
 .expense-meta small{
 font:8px/1.5 var(--mono);
 color:#837968}
+.duplicate-notice{
+display:grid;
+gap:4px;
+padding:9px 11px;
+border-left:2px solid #c58f52;
+background:#241c13;
+color:#e2bd83}
+.duplicate-notice b{font:9px var(--mono)}
+.duplicate-notice small{color:#b4a085}
 .expense-row>strong{
 font:10px var(--mono);
 white-space:nowrap;
