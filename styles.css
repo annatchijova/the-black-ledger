@@ -1111,3 +1111,24 @@ width:100%}
 @media(max-width:850px){
 .recurring-row{grid-template-columns:1fr}
 .recurring-instance-form{align-items:stretch;flex-direction:column}}
+
+.agreement-form{
+display:grid;
+gap:14px}
+.agreement-form>label{
+display:grid;
+gap:7px}
+.agreement-form textarea{
+min-height:68px;
+resize:vertical}
+.agreement-list{
+display:grid;
+gap:10px}
+.agreement-list article{
+padding:15px;
+border:1px solid var(--line)}
+.agreement-list p{
+margin:8px 0;
+white-space:pre-wrap}
+.agreement-list small{
+color:var(--muted)}

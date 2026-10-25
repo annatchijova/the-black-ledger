@@ -142,6 +142,7 @@ export function validateEvent(event, baseCurrency = "USD") {
       break;
     case "SESSION_RULES_RECORDED":
       requireId(event.sessionId, "Session ID"); if (!Array.isArray(event.rules) || event.rules.length > 50) fail("Session rules must be a bounded list.");
+      if (event.rules.some((rule) => !rule || !new Set(["shared_costs", "personal_costs", "tips", "cancellations", "payment_deadline"]).has(rule.category) || typeof rule.text !== "string" || !rule.text.trim() || rule.text.length > 500)) fail("Each agreement rule needs a supported category and a statement under 500 characters.");
       break;
     case "MEMBER_ADDED":
       requireId(event.memberId, "Participant ID"); requireText(event.name, "Participant name", 80);

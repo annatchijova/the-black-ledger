@@ -89,11 +89,16 @@ function emptyState(title, body, href, action) {
 
 function membersPage(current) {
   const canAdmin = getAccessContext().role === "organizer";
+  const agreementFields = [["shared_costs", "Shared costs", "Which costs are shared, and who is included?"], ["personal_costs", "Personal costs", "Which expenses remain personal?"], ["tips", "Tips and service charges", "How are tips and service charges split?"], ["cancellations", "Cancellations", "How are cancellations and non-refundable costs handled?"], ["payment_deadline", "Settlement deadline", "When should outstanding balances be settled?"]];
+  const agreement = new Map();
+  for (const event of current.events) if (event.type === "SESSION_RULES_RECORDED") for (const rule of event.rules) agreement.set(rule.category, { ...rule, at: event.at });
   return `${header("The Broken Mirror", "Reflections of those bound by this journey.", "CHAMBER 01 · THE WITNESSES")}
     <section class="feature-card mirror-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/broken-mirror.png" alt=""></div><div><div class="eyebrow">A NAME ENTERED BECOMES A WITNESS</div><h2>Who shared the account?</h2><p>Add the people whose spending and contributions belong in this ledger. This local level is operated by one organizer.</p></div></section>
     ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="member-form"><label for="member-name">Participant name</label><div class="input-row"><input id="member-name" name="name" maxlength="48" placeholder="e.g. Alex" required autocomplete="off"><button class="button button-gold" type="submit">Add to the mirror <span>↗</span></button></div><small>Up to 100 names. Entries are saved to the shared event log.</small></form>` : ""}
     ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="invite-form"><label for="invite-name">Invite someone to this ledger</label><div class="input-row"><input id="invite-name" name="name" maxlength="80" placeholder="Participant name" required><select name="role"><option value="member">Participant</option><option value="witness">Read-only witness</option></select><button class="button button-quiet" type="submit">Create invite link</button></div><output id="invite-link" aria-live="polite"></output></form>` : ""}
     ${!current.archived && canAdmin && current.members.length ? `<form class="form-panel inline-form" id="group-form"><label for="group-name">Create a temporary subgroup</label><div class="input-row"><input id="group-name" name="name" maxlength="80" placeholder="e.g. Museum afternoon" required><button class="button button-quiet" type="submit">Create subgroup</button></div><fieldset class="beneficiary-fieldset"><legend>Participants</legend><div class="check-grid">${current.members.map((member) => `<label class="check-row"><input type="checkbox" name="groupMember" value="${h(member.id)}"><span>${h(member.name)}</span></label>`).join("")}</div></fieldset></form>` : ""}
+    ${!current.archived && canAdmin ? `<form class="form-panel agreement-form" id="agreement-form"><div class="eyebrow">AGREED BEFORE THE JOURNEY</div><h2>Record shared expectations</h2><p>Each statement is saved with its timestamp. Later updates add a new record to the history.</p>${agreementFields.map(([category, label, placeholder]) => `<label>${label}<textarea name="${category}" maxlength="500" rows="2" placeholder="${placeholder}">${h(agreement.get(category)?.text ?? "")}</textarea></label>`).join("")}<output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Save agreement record</button></form>` : ""}
+    ${agreement.size ? `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">CURRENT AGREEMENT</div><h2>Rules of this journey</h2></div><span class="count">${agreement.size} topics</span></div><div class="agreement-list">${agreementFields.filter(([category]) => agreement.has(category)).map(([category, label]) => `<article><b>${label}</b><p>${h(agreement.get(category).text)}</p><small>Recorded ${eventDate(agreement.get(category).at)}</small></article>`).join("")}</div></section>` : ""}
     ${current.groups.length ? `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">TEMPORARY PARTIES</div><h2>Subgroups</h2></div><span class="count">${current.groups.length} groups</span></div><div class="member-list">${current.groups.map((group) => `<article class="member-row"><span class="avatar">◌</span><span class="member-name"><b>${h(group.name)}</b><small>${group.memberIds.map((id) => h(memberName(id))).join(", ")}</small></span></article>`).join("")}</div></section>` : ""}
     <section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PRESENT</div><h2>Participants <span class="count">${current.members.length} / 100</span></h2></div></div>${current.members.length ? `<div class="member-list full-list">${current.members.map((m) => memberCard(m, current, true)).join("")}</div>` : emptyState("No reflections yet.", "Add the first participant to begin.", "#members", "Add a participant")}</section>`;
 }
@@ -445,6 +450,20 @@ function bindPage(current) {
       output.textContent = error.message;
       output.hidden = false;
     }
+  });
+
+  const agreementForm = document.querySelector("#agreement-form");
+  agreementForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(agreementForm);
+    const rules = ["shared_costs", "personal_costs", "tips", "cancellations", "payment_deadline"].map((category) => ({ category, text: String(data.get(category) ?? "").trim() })).filter((rule) => rule.text);
+    if (!rules.length) {
+      const output = agreementForm.querySelector("[data-action-error]");
+      output.textContent = "Add at least one agreement before saving.";
+      output.hidden = false;
+      return;
+    }
+    commitFromForm(agreementForm, "SESSION_RULES_RECORDED", { sessionId: current.session.id, rules }, "Agreement recorded in the ledger history.");
   });
 
   const recurringRuleForm = document.querySelector("#recurring-rule-form");
