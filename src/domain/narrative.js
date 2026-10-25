@@ -32,7 +32,7 @@ export function deriveNarrativeEvents(ledger, { priorLedgers = [] } = {}) {
   const pattern = narrativePattern(ledger);
   if (pattern && priorLedgers.some((prior) => prior.pattern === pattern)) emit("repeated", ledger.session?.id ?? "session", ledger.events?.at(-1)?.at ?? new Date(0).toISOString());
   for (const budget of ledger.budgets ?? []) {
-    const spent = (ledger.expenses ?? []).filter((expense) => expense.currency === budget.currency).reduce((sum, expense) => sum + (expense.baseAmountMinor ?? 0), 0);
+    const spent = (ledger.expenses ?? []).filter((expense) => expense.status !== "unassigned" && Date.parse(expense.at) >= Date.parse(budget.at)).reduce((sum, expense) => sum + (expense.baseAmountMinor ?? 0), 0);
     if (spent >= budget.amountMinor) emit("budget", budget.id, budget.at, { spentMinor: spent, budgetMinor: budget.amountMinor });
   }
   return found;

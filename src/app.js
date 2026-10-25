@@ -113,7 +113,20 @@ function expensePage(current) {
     ${!enough ? emptyState("The table is empty.", "Enter at least one participant before recording a cost.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect the expenses and their evidence." : "Start another ledger to record new expenses."}</p></div></div>` : `<form class="form-panel expense-form" id="expense-form"><div class="form-heading"><div><div class="eyebrow">A NEW ENTRY</div><h2>Record an expense</h2></div><span class="form-index">02 / 05</span></div><div class="field-grid"><label>Description<input name="description" maxlength="120" placeholder="Dinner, train tickets…" required></label><label>Receipt currency<select name="currency" id="expense-currency">${currencyOptions}</select></label><label><span id="source-total-label">Total amount · ${h(ledgerCurrency())}</span><input name="amount" inputmode="decimal" required></label><label>Paid by<select name="payer" required><option value="unassigned">Unknown / unassigned</option>${payerOptions.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("")}</select></label><label>Allocation rule<select name="splitMode" id="split-mode"><option value="equal">Split equally</option><option value="custom">Enter each share</option></select></label>${groupOptions ? `<label>Apply a subgroup<select name="group" id="expense-group"><option value="">All participants</option>${groupOptions}</select></label>` : ""}</div><fieldset id="fx-fields" class="form-panel fx-fields" hidden><legend>Conversion evidence · target ${h(ledgerCurrency())}</legend><div class="field-grid"><label>Ledger total · ${h(ledgerCurrency())}<input name="baseAmount" inputmode="decimal"></label><label>${h(ledgerCurrency())} per 1 <span id="fx-source-currency">foreign unit</span><input name="fxRate" inputmode="decimal" placeholder="1.08"></label><label>Rate source<input name="fxSource" maxlength="120" placeholder="Card statement, exchange receipt…"></label><label>Rate observed at<input name="fxObservedAt" type="datetime-local"></label><label>Conversion fee · ${h(ledgerCurrency())}<input name="fxFee" inputmode="decimal" value="0"></label><label>Fee paid by<select name="fxFeePayer"><option value="">No conversion fee</option>${feePayerOptions}</select></label></div><p class="field-hint">Enter the rate as an exact decimal. The converted total and fee must reconcile to the ledger total.</p></fieldset><fieldset class="beneficiary-fieldset"><legend>Who benefited from this expense?</legend><div class="check-grid">${rows}</div></fieldset><div id="custom-shares" class="custom-shares" hidden></div><div class="form-footer"><p>Shares reconcile to the ledger total. Unknown charges stay unassigned until identified.</p><button class="button button-gold" type="submit">Write into the ledger <span>↗</span></button></div></form>`}
     <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map((expense) => expenseRow(expense, current)).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>
     ${commitmentSection(current)}
-    ${giftSection(current)}`;
+    ${giftSection(current)}
+    ${budgetSection(current)}`;
+}
+
+function budgetSection(current) {
+  const canManage = getAccessContext().role === "organizer" && !current.archived;
+  const form = canManage ? `<form class="form-panel" id="budget-form"><div class="eyebrow">AGREED ALLOWANCE</div><h2>Set a travel budget</h2><div class="field-grid"><label>Budget label<input name="period" maxlength="80" placeholder="Lisbon weekend" required></label><label>Limit · ${h(ledgerCurrency())}<input name="amount" inputmode="decimal" required></label></div><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record budget</button><p class="field-hint">Each new budget starts a fresh tracking period. The ledger keeps earlier limits in its event history.</p></form>` : "";
+  const entries = current.budgets.map((budget, index) => {
+    const spentMinor = current.expenses.filter((expense) => expense.status !== "unassigned" && Date.parse(expense.at) >= Date.parse(budget.at)).reduce((sum, expense) => sum + expense.baseAmountMinor, 0);
+    const active = index === current.budgets.length - 1;
+    const over = spentMinor >= budget.amountMinor;
+    return `<article class="budget-row"><div><b>${h(budget.period)}</b><small>${active ? "Current budget" : "Previous limit"} · Set ${eventDate(budget.at)} · ${over ? "Limit reached" : "Within limit"}</small></div><progress max="${budget.amountMinor}" value="${Math.min(spentMinor, budget.amountMinor)}" aria-label="${h(budget.period)} budget usage"></progress><strong>${money(spentMinor)} / ${money(budget.amountMinor)}</strong></article>`;
+  }).join("");
+  return `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE BLEEDING ALLOWANCE</div><h2>Travel budgets</h2></div><span class="count">${current.budgets.length} records</span></div>${form}${entries ? `<div class="budget-list">${entries}</div>` : `<p class="empty-inline">No budget has been agreed for this journey.</p>`}</section>`;
 }
 
 function giftSection(current) {
@@ -398,6 +411,22 @@ function bindPage(current) {
       commitFromForm(giftForm, "SURPRISE_GIFT_RECORDED", { giftId: crypto.randomUUID(), recipientMemberId, payerMemberId, privateDescription: String(data.get("description")).trim(), amountMinor, contributions }, "Surprise gift recorded. Its recipient will see a confidential entry.");
     } catch (error) {
       const output = giftForm.querySelector("[data-action-error]");
+      output.textContent = error.message;
+      output.hidden = false;
+    }
+  });
+
+  const budgetForm = document.querySelector("#budget-form");
+  budgetForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(budgetForm);
+    try {
+      const amountMinor = parseLedgerAmount(data.get("amount"));
+      const period = String(data.get("period")).trim();
+      if (!period) throw new Error("Name the trip or budget period.");
+      commitFromForm(budgetForm, "BUDGET_SET", { amountMinor, currency: ledgerCurrency(), period }, "Budget recorded. Future expenses will be measured against this limit.");
+    } catch (error) {
+      const output = budgetForm.querySelector("[data-action-error]");
       output.textContent = error.message;
       output.hidden = false;
     }
