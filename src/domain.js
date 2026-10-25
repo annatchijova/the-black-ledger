@@ -89,6 +89,14 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         if (expense.groupIds.some((groupId) => !groups.has(groupId))) throw new Error("An expense refers to an unknown subgroup.");
         if (expense.evidenceIds.some((evidenceId) => !evidence.has(evidenceId))) throw new Error("An expense refers to evidence that has not been attached to this ledger.");
         if (expense.commitmentId && (!commitments.has(expense.commitmentId) || commitments.get(expense.commitmentId).status !== "open" || [...expenses.values()].some((prior) => prior.commitmentId === expense.commitmentId))) throw new Error("A commitment can be converted to one expense only while it is open.");
+        const linkedCommitment = expense.commitmentId ? commitments.get(expense.commitmentId) : null;
+        if (expense.status !== "unassigned") {
+          const committedMembers = new Set(linkedCommitment?.allocations.map((row) => row.memberId) ?? []);
+          if (members.get(expense.payerId).status !== "active" && (!linkedCommitment || linkedCommitment.payerMemberId !== expense.payerId)) throw new Error("A departed participant cannot be made responsible for a new expense.");
+          if (expense.allocations.some((row) => members.get(row.memberId).status !== "active" && !committedMembers.has(row.memberId))) throw new Error("A departed participant cannot be assigned a new expense without a prior commitment.");
+          if (linkedCommitment && (expense.allocations.length !== committedMembers.size || expense.allocations.some((row) => !committedMembers.has(row.memberId)))) throw new Error("A commitment expense must preserve its pre-approved participants.");
+          if (expense.fx?.feeMinor > 0 && members.get(expense.fx.feePayerMemberId).status !== "active" && !committedMembers.has(expense.fx.feePayerMemberId)) throw new Error("A departed participant cannot be assigned a new conversion fee.");
+        }
         if (expense.recurringRuleId && (!recurringRules.has(expense.recurringRuleId) || !expense.recurringPeriodKey || recurringPeriods.has(`${expense.recurringRuleId}:${expense.recurringPeriodKey}`) || [...expenses.values()].some((prior) => prior.recurringRuleId === expense.recurringRuleId && prior.recurringPeriodKey === expense.recurringPeriodKey))) throw new Error("A recurring expense needs an approved rule and a unique period.");
         expenses.set(expense.id, { ...expense, eventId: event.id }); break;
       }
@@ -119,7 +127,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         discrepancies.set(event.discrepancyId, { ...discrepancy, resolution: event.resolution, resolvedAt: event.at }); break;
       }
       case "COMMITMENT_RECORDED":
-        if (commitments.has(event.commitmentId) || event.allocations.some((row) => !members.has(row.memberId))) throw new Error("Commitment IDs must be unique and allocations must refer to current participants.");
+        if (commitments.has(event.commitmentId) || !members.has(event.payerMemberId) || members.get(event.payerMemberId).status !== "active" || event.allocations.some((row) => !members.has(row.memberId) || members.get(row.memberId).status !== "active")) throw new Error("Commitment IDs must be unique and allocations must refer to active participants.");
         commitments.set(event.commitmentId, { ...event, status: "open" }); break;
       case "COMMITMENT_UPDATED": {
         const item = commitments.get(event.commitmentId); if (!item) throw new Error("Commitment update references an unknown commitment.");
@@ -179,7 +187,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         assumed.push(event); break;
       case "BUDGET_SET": budgets.push({ ...event }); break;
       case "RECURRING_RULE_APPROVED":
-        if (recurringRules.has(event.ruleId) || event.allocations.some((row) => !members.has(row.memberId))) throw new Error("Recurring rules need a new ID and existing participants.");
+        if (recurringRules.has(event.ruleId) || event.allocations.some((row) => !members.has(row.memberId) || members.get(row.memberId).status !== "active")) throw new Error("Recurring rules need a new ID and active participants.");
         recurringRules.set(event.ruleId, event); break;
       case "RECURRING_INSTANCE_RECORDED": {
         if (!recurringRules.has(event.ruleId)) throw new Error("Recurring instance references an unapproved rule.");
@@ -192,7 +200,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         if (evidence.has(event.evidenceId)) throw new Error("Evidence IDs must be unique in a ledger.");
         evidence.set(event.evidenceId, event); break;
       case "SURPRISE_GIFT_RECORDED":
-        if (gifts.has(event.giftId) || !members.has(event.recipientMemberId) || !members.has(event.payerMemberId) || event.recipientMemberId === event.payerMemberId || event.contributions.some((row) => !members.has(row.memberId) || row.memberId === event.recipientMemberId)) throw new Error("Gift records need a unique ID, a separate recipient, and known contributors.");
+        if (gifts.has(event.giftId) || !members.has(event.recipientMemberId) || !members.has(event.payerMemberId) || members.get(event.payerMemberId).status !== "active" || event.recipientMemberId === event.payerMemberId || event.contributions.some((row) => !members.has(row.memberId) || members.get(row.memberId).status !== "active" || row.memberId === event.recipientMemberId)) throw new Error("Gift records need a unique ID, an active payer, a separate recipient, and active contributors.");
         gifts.set(event.giftId, { ...event });
         const giftExpenseId = `gift_${event.giftId}`;
         if (expenses.has(giftExpenseId)) throw new Error("Gift expense IDs must be unique.");

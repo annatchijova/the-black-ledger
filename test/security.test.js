@@ -71,6 +71,15 @@ test("API enforces participant authorization and confidential gift visibility", 
   });
   const timestamp = () => new Date().toISOString();
 
+  const commitmentId = randomUUID();
+  const precommitted = await addEvent(session.accessToken, {
+    id: randomUUID(), at: timestamp(), type: "COMMITMENT_RECORDED", commitmentId,
+    description: "Non-refundable ticket booked before departure", amountMinor: 1000,
+    payerMemberId: departed.memberId, allocations: [{ memberId: departed.memberId, cents: 1000 }],
+    refundability: "nonrefundable"
+  });
+  assert.equal(precommitted.status, 201);
+
   const departure = await addEvent(session.accessToken, { id: randomUUID(), at: timestamp(), type: "MEMBER_STATUS_CHANGED", memberId: departed.memberId, status: "departed" });
   assert.equal(departure.status, 201);
 
@@ -100,6 +109,29 @@ test("API enforces participant authorization and confidential gift visibility", 
     allocations: [{ memberId: departed.memberId, cents: 500 }]
   });
   assert.equal(forgedExpense.status, 403, "the departed token must remain unable to write after the attempted reactivation");
+
+  const newDebtForDeparted = await addEvent(attacker.accessToken, {
+    id: randomUUID(), at: timestamp(), type: "EXPENSE_RECORDED", description: "New cost after departure",
+    payerId: attacker.memberId, amountMinor: 500, currency: "USD", baseAmountMinor: 500,
+    allocations: [{ memberId: attacker.memberId, cents: 250 }, { memberId: departed.memberId, cents: 250 }]
+  });
+  assert.equal(newDebtForDeparted.status, 403, "an active participant must not create a new obligation for someone who departed earlier");
+  const newCommitmentForDeparted = await addEvent(attacker.accessToken, {
+    id: randomUUID(), at: timestamp(), type: "COMMITMENT_RECORDED", commitmentId: randomUUID(),
+    description: "New reservation after departure", amountMinor: 500, payerMemberId: attacker.memberId,
+    allocations: [{ memberId: attacker.memberId, cents: 250 }, { memberId: departed.memberId, cents: 250 }],
+    refundability: "refundable"
+  });
+  assert.equal(newCommitmentForDeparted.status, 403, "a participant must not create a new commitment for someone who departed earlier");
+
+  const priorCommitmentCost = await addEvent(session.accessToken, {
+    id: randomUUID(), at: timestamp(), type: "EXPENSE_RECORDED", description: "The booked ticket was used",
+    payerId: departed.memberId, amountMinor: 1000, currency: "USD", baseAmountMinor: 1000,
+    allocations: [{ memberId: departed.memberId, cents: 1000 }], commitmentId
+  });
+  assert.equal(priorCommitmentCost.status, 201, "a pre-departure commitment can still be settled after departure");
+  const commitmentResolved = await addEvent(session.accessToken, { id: randomUUID(), at: timestamp(), type: "COMMITMENT_UPDATED", commitmentId, status: "consumed", reason: "Booked ticket cost was recorded" });
+  assert.equal(commitmentResolved.status, 201);
 
   const organizerReactivation = await addEvent(session.accessToken, { id: randomUUID(), at: timestamp(), type: "MEMBER_STATUS_CHANGED", memberId: departed.memberId, status: "active" });
   assert.equal(organizerReactivation.status, 201, "the organizer retains the intended reactivation path");

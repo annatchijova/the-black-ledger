@@ -276,6 +276,12 @@ async function route(req, res) {
       if (actor && before.members.find((member) => member.id === actor)?.status !== "active") return send(res, 403, { error: "Departed or removed participants cannot change this ledger." });
       if (actor && event?.type === "EXPENSE_RECORDED" && event.recurringRuleId) return send(res, 403, { error: "Only the organizer can generate an expense from an approved recurring rule." });
       if (actor && event?.type === "EXPENSE_RECORDED" && (event.paidByMemberId ?? event.payerId) !== actor) return send(res, 403, { error: "A participant can only enter an expense they paid." });
+      if (actor && event?.type === "EXPENSE_RECORDED") {
+        const commitment = before.commitments.find((item) => item.commitmentId === event.commitmentId);
+        const priorCommitmentMembers = new Set(commitment?.allocations.map((row) => row.memberId) ?? []);
+        if ((event.allocations ?? []).some((row) => before.members.find((member) => member.id === row.memberId)?.status !== "active" && !priorCommitmentMembers.has(row.memberId))) return send(res, 403, { error: "A participant cannot assign a new expense to someone who has departed." });
+      }
+      if (actor && event?.type === "COMMITMENT_RECORDED" && (event.allocations ?? []).some((row) => before.members.find((member) => member.id === row.memberId)?.status !== "active")) return send(res, 403, { error: "A participant cannot create a new commitment for someone who has departed." });
       if (actor && event?.type === "MEMBER_CONFIRMED_EXPENSE" && event.memberId !== actor) return send(res, 403, { error: "A participant can only confirm their own expense allocation." });
       if (actor && event?.type === "EXPENSE_DISCREPANCY_RECORDED" && event.raisedByMemberId !== actor) return send(res, 403, { error: "A participant can only raise a discrepancy under their own name." });
       if (actor && event?.type === "EXPENSE_DISCREPANCY_RECORDED") {

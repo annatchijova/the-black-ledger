@@ -4,7 +4,7 @@
 
 **Date:** 2026-10-25
 **Base:** `main` at `94dfdb4` (before the fix in this change)
-**Scope:** API event authorization, participant lifecycle, write access, ledger reactivation, expense dispute authorization, and recipient privacy for confidential gift descriptions. PayPal and OpenAI provider calls were not exercised.
+**Scope:** API event authorization, participant lifecycle, write access, ledger reactivation, expense dispute authorization, liability allocation after departure, and recipient privacy for confidential gift descriptions. PayPal and OpenAI provider calls were not exercised.
 **Reproduction:** `npm test` runs `test/security.test.js` against an isolated SQLite database.
 
 ## Threat model
@@ -23,6 +23,7 @@
 |---|---|---|---|---|
 | BL-RT-001 | Medium | Confirmed by induction | Authorization vulnerability | An active participant could reactivate a departed participant using `MEMBER_JOINED`. Fixed by making that event organizer-only. |
 | BL-RT-002 | Medium | Confirmed by induction | Authorization and integrity vulnerability | A participant unrelated to an expense could create an unresolved dispute against it. Fixed at the API and domain boundaries. |
+| BL-RT-003 | Medium | Confirmed by induction | Financial integrity vulnerability | A participant could allocate a new expense to someone already marked departed. Fixed while preserving expenses from prior commitments. |
 
 ## Findings
 
@@ -58,6 +59,22 @@
 - **Causal chain:** caller identity matches `raisedByMemberId` → no expense relationship check → discrepancy appended → unresolved discrepancy becomes a closure blocker.
 - **Fix:** The API now requires a participant to be the payer or an allocated participant; member tokens cannot dispute unassigned expenses. The domain reducer enforces that every discrepancy references an assigned expense and a payer or allocated participant. The regression test expects 403 for an unrelated participant and 201 for an assigned participant.
 
+### BL-RT-003 — New expenses could add liability to a departed participant
+
+**Severity:** Medium
+**Epistemic level:** Confirmed by induction
+**Bucket:** Software vulnerability
+**Status:** Fixed in this change.
+
+**Severity rationale:** A participant who had left the ledger could be assigned a new share by another active participant. This contradicted the lifecycle rule that departure preserves existing obligations while stopping new activity. The change does not remove debts already recorded or commitments approved before departure.
+
+- **Surprise:** The UI still showed departed participants as expense beneficiaries, and the API/domain checked only that a beneficiary existed in the session.
+- **Abduction:** A caller with a valid active token may be able to create a new expense for an inactive participant, even though the latter can no longer consent through their token.
+- **Prediction (stated before execution):** After A is marked departed, B can submit a new expense paid by B and allocated partly to A; the API will accept it. A commitment recorded before A's departure should remain recordable as an expense afterward.
+- **Induction on base `5283801`:** The isolated API test returned HTTP **201** for the new expense allocation. The pre-departure commitment was also accepted and then settled successfully after departure. This confirms both the unsafe path and the compatibility condition.
+- **Causal chain:** departed member remains in `members` → expense validation checks membership existence only → B appends expense allocating a share to A → A acquires a new balance without an active token.
+- **Fix:** New commitments and recurring rules require active participants; new expense allocation to an inactive member is rejected unless that member was part of a linked commitment recorded before departure. Commitment-linked expenses must preserve the pre-approved participant set. New gifts require active payers and contributors. The API and domain both enforce these rules, and the UI now filters departed participants from new allocation controls.
+
 ## Discarded vectors
 
 | Vector | Result | Evidence |
@@ -67,6 +84,7 @@
 | Participant records an expense as paid by another member | Falsified | The API compares `payerId` with the token's member ID; regression check expects 403. |
 | Gift recipient retrieves the private description through event or derived-state responses | Falsified | The recipient-scoped API response omits the secret phrase from both event and state JSON. |
 | Unrelated participant can create a dispute after the fix | Falsified | The integration test receives 403; an assigned participant still receives 201. |
+| A departed participant can be assigned a new expense or commitment after the fix | Falsified | Both API requests receive 403; a previously recorded commitment can still be settled after departure. |
 
 ## Verification limits
 
