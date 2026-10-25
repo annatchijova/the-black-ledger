@@ -682,6 +682,16 @@ font:9px/1.55 var(--mono)}
 .dispute-note{padding:8px;border-left:2px solid #8b7045;background:#19150f}
 .expense-review [role=alert]{color:#e0a298}
 .expense-review button:disabled{opacity:.6;cursor:wait}
+.commitment-list{display:grid;gap:12px;margin-top:16px}
+.commitment-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px 14px;border-top:1px solid #352d23;padding:13px 2px;color:#d4c5a8}
+.commitment-row>div:first-child{display:grid;gap:5px;min-width:0}
+.commitment-row small{color:#837968;font:8px/1.5 var(--mono)}
+.commitment-row>strong{font:10px var(--mono);white-space:nowrap;color:#d4bd87}
+.commitment-refund-form,.commitment-actions{grid-column:1/-1;display:flex;align-items:end;flex-wrap:wrap;gap:8px}
+.commitment-refund-form label{display:grid;gap:5px;min-width:180px;color:#a99b84;font:9px var(--mono)}
+.commitment-refund-form input{max-width:220px}
+.commitment-row [role=alert]{flex-basis:100%;color:#e0a298;font:9px var(--mono)}
+.empty-inline{color:#a99b84;font:10px/1.6 var(--mono)}
 .honesty-note,.calculation-note{
 display:flex;
 align-items:flex-start;

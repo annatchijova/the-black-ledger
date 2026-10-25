@@ -106,7 +106,43 @@ function expensePage(current) {
     <section class="feature-card phone-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/black-telephone.png" alt=""></div><div><div class="eyebrow">THE RECEIPT IS EVIDENCE</div><h2>Enter what happened.</h2><p>Receipt analysis proposes details for a person to review. It never writes into the ledger by itself.</p></div><span class="coming-tag">HUMAN REVIEW</span></section>
     ${!current.archived && !readOnly ? `<section class="form-panel"><label for="receipt-image">Receipt image</label><div class="input-row"><input id="receipt-image" type="file" accept="image/jpeg,image/png,image/webp"><button class="button button-quiet" id="analyze-receipt" type="button">Propose receipt details</button></div><pre id="receipt-proposal" hidden aria-live="polite"></pre></section>` : ""}
     ${!enough ? emptyState("The table is empty.", "Enter at least one participant before recording a cost.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect the expenses and their evidence." : "Start another ledger to record new expenses."}</p></div></div>` : `<form class="form-panel expense-form" id="expense-form"><div class="form-heading"><div><div class="eyebrow">A NEW ENTRY</div><h2>Record an expense</h2></div><span class="form-index">02 / 05</span></div><div class="field-grid"><label>Description<input name="description" maxlength="120" placeholder="Dinner, train tickets…" required></label><label>Total amount <span class="field-hint">USD</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label><label>Paid by<select name="payer" required><option value="unassigned">Unknown / unassigned</option>${payerOptions.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("")}</select></label><label>Allocation rule<select name="splitMode" id="split-mode"><option value="equal">Split equally</option><option value="custom">Enter each share</option></select></label>${groupOptions ? `<label>Apply a subgroup<select name="group" id="expense-group"><option value="">All participants</option>${groupOptions}</select></label>` : ""}</div><fieldset class="beneficiary-fieldset"><legend>Who benefited from this expense?</legend><div class="check-grid">${rows}</div></fieldset><div id="custom-shares" class="custom-shares" hidden></div><div class="form-footer"><p>Shares reconcile to the total. If the payer is unknown, the expense stays unassigned until corrected.</p><button class="button button-gold" type="submit">Write into the ledger <span>↗</span></button></div></form>`}
-    <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map((expense) => expenseRow(expense, current)).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>`;
+    <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map((expense) => expenseRow(expense, current)).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>
+    ${commitmentSection(current)}`;
+}
+
+function commitmentSection(current) {
+  const access = getAccessContext();
+  const canCreate = !current.archived && access.role !== "witness" && current.members.length > 0;
+  const payerOptions = current.members.filter((member) => access.role !== "member" || member.id === access.memberId).map((member) => `<option value="${h(member.id)}">${h(member.name)}</option>`).join("");
+  const participantOptions = current.members.map((member) => `<label class="check-row"><input type="checkbox" name="commitmentMember" value="${h(member.id)}" checked><span>${h(member.name)}</span></label>`).join("");
+  const form = canCreate ? `<form class="form-panel" id="commitment-form"><div class="eyebrow">BEFORE THE RECEIPT</div><h2>Record a commitment</h2><div class="field-grid"><label>Description<input name="description" maxlength="240" required></label><label>Expected amount <span class="field-hint">USD</span><input name="amount" inputmode="decimal" required></label><label>Who committed to pay?<select name="payer" required>${payerOptions}</select></label><label>Refundability<select name="refundability" required><option value="refundable">Refundable</option><option value="partially_refundable">Partially refundable</option><option value="nonrefundable">Non-refundable</option></select></label></div><fieldset class="beneficiary-fieldset"><legend>Who shares this commitment?</legend><div class="check-grid">${participantOptions}</div></fieldset><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record commitment</button></form>` : "";
+  const entries = current.commitments.map((item) => {
+    const payerName = current.members.find((member) => member.id === item.payerMemberId)?.name ?? "Unknown participant";
+    const remaining = item.amountMinor - (item.refundedMinor ?? 0);
+    const linkedExpense = current.expenses.find((expense) => expense.commitmentId === item.commitmentId && expense.status !== "unassigned");
+    const canManage = !current.archived && item.status === "open" && (access.role === "organizer" || access.role === "member" && access.memberId === item.payerMemberId);
+    const refundForm = canManage && item.refundability !== "nonrefundable" && remaining > 0 ? `<form class="commitment-refund-form" data-commitment-id="${h(item.commitmentId)}" data-max-refund="${remaining}"><label>Record a refund <span class="field-hint">up to ${formatMoney(remaining)}</span><input name="amount" inputmode="decimal" required></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record refund</button></form>` : "";
+    const outcomeControls = canManage ? linkedExpense ? `<button class="button button-quiet commitment-outcome" type="button" data-commitment-id="${h(item.commitmentId)}" data-outcome="consumed">Finish as used</button><button class="button button-quiet commitment-outcome" type="button" data-commitment-id="${h(item.commitmentId)}" data-outcome="cancelled">Finish as cancelled</button>` : `<button class="button button-quiet commitment-outcome" type="button" data-commitment-id="${h(item.commitmentId)}" data-outcome="consumed" ${remaining === 0 ? "disabled" : ""}>Record as used</button><button class="button button-quiet commitment-outcome" type="button" data-commitment-id="${h(item.commitmentId)}" data-outcome="cancelled">Cancel and record remaining cost</button>` : "";
+    return `<article class="commitment-row"><div><b>${h(item.description)}</b><small>Committed by ${h(payerName)} · ${h(item.refundability.replaceAll("_", " "))} · ${h(item.status)}</small></div><strong>${formatMoney(item.amountMinor)}</strong>${item.refundedMinor ? `<small>Refunded ${formatMoney(item.refundedMinor)} · remaining exposure ${formatMoney(remaining)}</small>` : ""}${linkedExpense ? `<small>Linked expense: ${h(linkedExpense.description)}</small>` : ""}${refundForm}${outcomeControls ? `<div class="commitment-actions">${outcomeControls}</div>` : ""}</article>`;
+  }).join("");
+  return `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">RESERVATIONS AND CANCELLATIONS</div><h2>Commitments</h2></div><span class="count">${current.commitments.length} records</span></div>${form}${entries ? `<div class="commitment-list">${entries}</div>` : `<p class="empty-inline">No commitments recorded. Add a reservation before its final cost is known.</p>`}</section>`;
+}
+
+function allocateWeighted(totalMinor, rows) {
+  const weights = rows.map((row) => BigInt(row.baseMinor ?? row.amountMinor ?? row.cents));
+  const weightTotal = weights.reduce((sum, value) => sum + value, 0n);
+  if (weightTotal <= 0n) throw new Error("The commitment has no positive participant shares to allocate.");
+  const portions = weights.map((weight, index) => {
+    const numerator = BigInt(totalMinor) * weight;
+    return { memberId: rows[index].memberId, amount: numerator / weightTotal, remainder: numerator % weightTotal, index };
+  });
+  let unallocated = BigInt(totalMinor) - portions.reduce((sum, row) => sum + row.amount, 0n);
+  for (const portion of [...portions].sort((a, b) => a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1)) {
+    if (unallocated === 0n) break;
+    portion.amount += 1n;
+    unallocated -= 1n;
+  }
+  return portions.map(({ memberId, amount }) => ({ memberId, cents: Number(amount) }));
 }
 
 function expenseRow(event, current) {
@@ -255,6 +291,56 @@ function bindPage(current) {
     const name = String(data.get("name")).trim();
     commit("GROUP_CREATED", { groupId: crypto.randomUUID(), name, memberIds }, `Subgroup ${name} created.`);
   });
+
+  document.querySelector("#commitment-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      const amountMinor = parseAmountToCents(data.get("amount"));
+      const memberIds = data.getAll("commitmentMember");
+      if (!memberIds.length) throw new Error("Select at least one participant who shares this commitment.");
+      const base = Math.floor(amountMinor / memberIds.length);
+      let remainder = amountMinor - base * memberIds.length;
+      const allocations = memberIds.map((memberId) => ({ memberId, cents: base + (remainder-- > 0 ? 1 : 0) }));
+      commitFromForm(form, "COMMITMENT_RECORDED", { commitmentId: crypto.randomUUID(), description: String(data.get("description")).trim(), amountMinor, payerMemberId: data.get("payer"), allocations, refundability: data.get("refundability") }, "Commitment recorded; its final cost remains separate from expenses.");
+    } catch (error) {
+      const output = event.currentTarget.querySelector("[data-action-error]");
+      output.textContent = error.message;
+      output.hidden = false;
+    }
+  });
+
+  document.querySelectorAll(".commitment-refund-form").forEach((form) => form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const item = current.commitments.find((commitment) => commitment.commitmentId === form.dataset.commitmentId);
+      const amountMinor = parseAmountToCents(new FormData(form).get("amount"));
+      if (!item || amountMinor > Number(form.dataset.maxRefund)) throw new Error("Refund must be no greater than the remaining commitment amount.");
+      const allocations = allocateWeighted(amountMinor, item.allocations);
+      commitFromForm(form, "COMMITMENT_REFUND_RECORDED", { commitmentId: item.commitmentId, amountMinor, allocations, reason: "Refund recorded against the commitment." }, "Commitment refund recorded.");
+    } catch (error) {
+      const output = form.querySelector("[data-action-error]");
+      output.textContent = error.message;
+      output.hidden = false;
+    }
+  }));
+
+  document.querySelectorAll(".commitment-outcome").forEach((button) => button.addEventListener("click", async () => {
+    const item = current.commitments.find((commitment) => commitment.commitmentId === button.dataset.commitmentId);
+    if (!item || item.status !== "open") return;
+    const outcome = button.dataset.outcome;
+    const remaining = item.amountMinor - (item.refundedMinor ?? 0);
+    const linkedExpense = current.expenses.find((expense) => expense.commitmentId === item.commitmentId && expense.status !== "unassigned");
+    if (!linkedExpense && outcome === "consumed" && remaining <= 0) return showToast("A fully refunded commitment can be cancelled, but has no remaining expense to consume.");
+    button.disabled = true;
+    if (!linkedExpense && remaining > 0) {
+      const allocations = allocateWeighted(remaining, item.allocations);
+      const recorded = await commit("EXPENSE_RECORDED", { expenseId: crypto.randomUUID(), description: item.description, payerId: item.payerMemberId, totalCents: remaining, allocations, commitmentId: item.commitmentId }, outcome === "consumed" ? "Final commitment cost recorded." : "Non-refundable cancellation cost recorded.");
+      if (!recorded) return;
+    }
+    commit("COMMITMENT_UPDATED", { commitmentId: item.commitmentId, status: outcome, reason: outcome === "consumed" ? "Commitment cost was recorded as an expense." : "Commitment was cancelled; any remaining cost stays in the ledger." }, outcome === "consumed" ? "Commitment marked as used." : "Commitment cancelled with its remaining cost preserved.");
+  }));
 
   const expenseForm = document.querySelector("#expense-form");
   const custom = document.querySelector("#custom-shares");
