@@ -33,6 +33,25 @@ async function commit(type, fields, successMessage) {
   }
 }
 
+async function commitFromForm(form, type, fields, successMessage) {
+  const submit = form.querySelector("button[type=submit]");
+  const errorOutput = form.querySelector("[data-action-error]");
+  if (submit) submit.disabled = true;
+  if (errorOutput) { errorOutput.hidden = true; errorOutput.textContent = ""; }
+  try {
+    events = await appendEvent(events, type, fields);
+    const warnings = takeAppendWarnings();
+    render();
+    showToast(warnings.length ? `Possible duplicate: ${warnings.map((item) => item.reason).join("; ")}. Check the record; nothing was removed.` : successMessage);
+    return true;
+  } catch (error) {
+    if (submit) submit.disabled = false;
+    if (errorOutput) { errorOutput.textContent = `${error.message} Your entries are still here. Reload if this ledger changed in another session, then retry.`; errorOutput.hidden = false; }
+    showToast(error.message);
+    return false;
+  }
+}
+
 function header(title, subtitle, eyebrow = "THE LEDGER") {
   return `<div class="view-heading"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div><span class="heading-mark" aria-hidden="true">✳</span></div>`;
 }
@@ -87,12 +106,27 @@ function expensePage(current) {
     <section class="feature-card phone-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/black-telephone.png" alt=""></div><div><div class="eyebrow">THE RECEIPT IS EVIDENCE</div><h2>Enter what happened.</h2><p>Receipt analysis proposes details for a person to review. It never writes into the ledger by itself.</p></div><span class="coming-tag">HUMAN REVIEW</span></section>
     ${!current.archived && !readOnly ? `<section class="form-panel"><label for="receipt-image">Receipt image</label><div class="input-row"><input id="receipt-image" type="file" accept="image/jpeg,image/png,image/webp"><button class="button button-quiet" id="analyze-receipt" type="button">Propose receipt details</button></div><pre id="receipt-proposal" hidden aria-live="polite"></pre></section>` : ""}
     ${!enough ? emptyState("The table is empty.", "Enter at least one participant before recording a cost.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect the expenses and their evidence." : "Start another ledger to record new expenses."}</p></div></div>` : `<form class="form-panel expense-form" id="expense-form"><div class="form-heading"><div><div class="eyebrow">A NEW ENTRY</div><h2>Record an expense</h2></div><span class="form-index">02 / 05</span></div><div class="field-grid"><label>Description<input name="description" maxlength="120" placeholder="Dinner, train tickets…" required></label><label>Total amount <span class="field-hint">USD</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label><label>Paid by<select name="payer" required><option value="unassigned">Unknown / unassigned</option>${payerOptions.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("")}</select></label><label>Allocation rule<select name="splitMode" id="split-mode"><option value="equal">Split equally</option><option value="custom">Enter each share</option></select></label>${groupOptions ? `<label>Apply a subgroup<select name="group" id="expense-group"><option value="">All participants</option>${groupOptions}</select></label>` : ""}</div><fieldset class="beneficiary-fieldset"><legend>Who benefited from this expense?</legend><div class="check-grid">${rows}</div></fieldset><div id="custom-shares" class="custom-shares" hidden></div><div class="form-footer"><p>Shares reconcile to the total. If the payer is unknown, the expense stays unassigned until corrected.</p><button class="button button-gold" type="submit">Write into the ledger <span>↗</span></button></div></form>`}
-    <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map(expenseRow).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>`;
+    <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map((expense) => expenseRow(expense, current)).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>`;
 }
 
-function expenseRow(event) {
-  const groupNames = (event.groupIds ?? []).map((id) => ledger().groups.find((group) => group.id === id)?.name).filter(Boolean);
-  return `<article class="expense-row"><span class="row-icon">⌕</span><span class="expense-meta"><b>${h(event.description)}</b><small>Paid by ${h(memberName(event.payerId))} · Shared by ${event.allocations.length} participant${event.allocations.length === 1 ? "" : "s"}${groupNames.length ? ` · ${groupNames.map(h).join(", ")}` : ""} · ${eventDate(event.at)}</small></span><strong>${formatMoney(event.totalCents)}</strong></article>`;
+function expenseRow(event, current) {
+  const groupNames = (event.groupIds ?? []).map((id) => current.groups.find((group) => group.id === id)?.name).filter(Boolean);
+  return `<article class="expense-row"><span class="row-icon">⌕</span><span class="expense-meta"><b>${h(event.description)}</b><small>Paid by ${h(current.members.find((member) => member.id === event.payerId)?.name ?? "Unknown participant")} · Shared by ${event.allocations.length} participant${event.allocations.length === 1 ? "" : "s"}${groupNames.length ? ` · ${groupNames.map(h).join(", ")}` : ""} · ${eventDate(event.at)}</small></span><strong>${formatMoney(event.totalCents)}</strong>${expenseReview(event, current)}</article>`;
+}
+
+function expenseReview(expense, current) {
+  const access = getAccessContext();
+  const confirmations = current.confirmations.filter((item) => item.expenseId === expense.id);
+  const discrepancies = current.discrepancies.filter((item) => item.expenseId === expense.id);
+  const assigned = access.role === "member" && (expense.payerId === access.memberId || expense.allocations.some((row) => row.memberId === access.memberId));
+  const ownConfirmation = confirmations.find((item) => item.memberId === access.memberId);
+  const openOwnDispute = discrepancies.find((item) => item.raisedByMemberId === access.memberId && !item.resolution);
+  const canAct = assigned && !current.archived;
+  const reviewSummary = confirmations.length ? confirmations.map((item) => `${h(current.members.find((member) => member.id === item.memberId)?.name ?? "Unknown participant")}: ${h(item.decision)}`).join(" · ") : "No participant has confirmed a share yet.";
+  const confirmationControl = canAct ? ownConfirmation?.decision === "accepted" ? `<span class="status-pill open">Your share is confirmed</span>` : `<button class="button button-quiet expense-confirm" type="button" data-expense-id="${h(expense.id)}">Confirm my share</button>` : "";
+  const disputeControl = canAct && !openOwnDispute ? `<details class="expense-dispute"><summary>Report a discrepancy</summary><form class="discrepancy-form" data-expense-id="${h(expense.id)}"><label>What does not match?<textarea name="claim" maxlength="500" required></textarea></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record discrepancy</button></form></details>` : openOwnDispute ? `<p class="dispute-note">Your discrepancy is awaiting resolution.</p>` : "";
+  const disputeRows = discrepancies.map((item) => `<div class="dispute-note"><b>${h(current.members.find((member) => member.id === item.raisedByMemberId)?.name ?? "Unknown participant")} reported:</b> ${h(item.claim)}${item.resolution ? `<br><b>Resolution:</b> ${h(item.resolution)}` : access.role === "organizer" && !current.archived ? `<form class="resolution-form" data-discrepancy-id="${h(item.discrepancyId)}"><label>Resolution<textarea name="resolution" maxlength="500" required></textarea></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Resolve discrepancy</button></form>` : "<br><span>Awaiting organizer review.</span>"}</div>`).join("");
+  return `<section class="expense-review" aria-label="Participant review for ${h(expense.description)}"><p><b>Share review:</b> ${reviewSummary}</p>${confirmationControl}${disputeControl}${disputeRows}</section>`;
 }
 
 function eventDescription(event) {
@@ -266,6 +300,25 @@ function bindPage(current) {
       if (saved) pendingEvidenceIds = [];
     } catch (error) { showToast(error.message); }
   });
+
+  document.querySelectorAll(".expense-confirm").forEach((button) => button.addEventListener("click", () => {
+    const access = getAccessContext();
+    commit("MEMBER_CONFIRMED_EXPENSE", { expenseId: button.dataset.expenseId, memberId: access.memberId, decision: "accepted" }, "Your share confirmation was recorded.");
+  }));
+
+  document.querySelectorAll(".discrepancy-form").forEach((form) => form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const claim = String(new FormData(form).get("claim")).trim();
+    if (!claim) { const output = form.querySelector("[data-action-error]"); output.textContent = "Describe what does not match before submitting."; output.hidden = false; form.elements.claim.focus(); return; }
+    commitFromForm(form, "EXPENSE_DISCREPANCY_RECORDED", { expenseId: form.dataset.expenseId, discrepancyId: crypto.randomUUID(), raisedByMemberId: getAccessContext().memberId, claim }, "Discrepancy recorded for organizer review.");
+  }));
+
+  document.querySelectorAll(".resolution-form").forEach((form) => form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const resolution = String(new FormData(form).get("resolution")).trim();
+    if (!resolution) { const output = form.querySelector("[data-action-error]"); output.textContent = "Record how this discrepancy was resolved."; output.hidden = false; form.elements.resolution.focus(); return; }
+    commitFromForm(form, "EXPENSE_DISCREPANCY_RESOLVED", { discrepancyId: form.dataset.discrepancyId, resolution }, "Discrepancy resolution recorded.");
+  }));
 
   document.querySelector("#payment-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
