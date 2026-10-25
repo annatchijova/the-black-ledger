@@ -9,6 +9,7 @@ import { deriveNarrativeEvents, narrativePattern } from "./domain/narrative.js";
 import { deriveLedger, parseEventLog, parseAmountToMinor, simulateLedger, findPossibleDuplicates } from "./domain.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const PAYPAL_APPROVAL_TTL_MS = 6 * 60 * 60 * 1000;
 if (existsSync(resolve(root, ".env")) && typeof process.loadEnvFile === "function") process.loadEnvFile(resolve(root, ".env"));
 const dataPath = resolve(process.env.LEDGER_DATA_DIR ?? resolve(root, "data"));
 mkdirSync(dataPath, { recursive: true });
@@ -309,10 +310,10 @@ async function route(req, res) {
       const previous = db.prepare("SELECT * FROM paypal_order_requests WHERE session_id = ? AND request_id = ?").get(sessionId, requestId);
       if (previous) {
         if (previous.fingerprint !== fingerprint) return send(res, 409, { error: "This idempotency key was already used for a different PayPal order." });
-        if (previous.status === "created" && Date.now() - Date.parse(previous.created_at) < 3 * 60 * 60 * 1000) return send(res, 200, { orderId: previous.order_id, status: "CREATED", approvalUrl: previous.approval_url, fromMemberId: previous.from_member_id, toMemberId: previous.to_member_id, amountMinor: previous.amount_minor, currency: "USD", replayed: true });
+        if (previous.status === "created" && Date.now() - Date.parse(previous.created_at) < PAYPAL_APPROVAL_TTL_MS) return send(res, 200, { orderId: previous.order_id, status: "CREATED", approvalUrl: previous.approval_url, fromMemberId: previous.from_member_id, toMemberId: previous.to_member_id, amountMinor: previous.amount_minor, currency: "USD", replayed: true });
         if (previous.status === "created") {
           const orderRecord = db.prepare("SELECT status FROM paypal_orders WHERE order_id = ? AND session_id = ?").get(previous.order_id, sessionId);
-          const expiredAt = new Date(Date.parse(previous.created_at) + 3 * 60 * 60 * 1000).toISOString();
+          const expiredAt = new Date(Date.parse(previous.created_at) + PAYPAL_APPROVAL_TTL_MS).toISOString();
           if (orderRecord?.status === "created") {
             const expired = { id: `paypal_${previous.order_id}_expired`, at: expiredAt, type: "SETTLEMENT_STATUS_RECORDED", settlementId: `paypal_${previous.order_id}`, status: "denied", reason: "PayPal approval window expired without capture." };
             append(sessionId, expired, `paypal-expire-${previous.order_id}`);
@@ -353,7 +354,7 @@ async function route(req, res) {
         const latestSession = db.prepare("SELECT event_count, head_hash FROM sessions WHERE id = ?").get(sessionId);
         if (latestSession.event_count !== sessionSnapshot.event_count || latestSession.head_hash !== sessionSnapshot.head_hash) throw Object.assign(new Error("The ledger changed while preparing checkout; reload and retry."), { status: 409 });
         const reservations = db.prepare("SELECT request_id, amount_minor, created_at, status, order_id FROM paypal_order_requests WHERE session_id = ? AND from_member_id = ? AND to_member_id = ? AND status IN ('creating', 'created')").all(sessionId, body.fromMemberId, body.toMemberId);
-        const reserved = reservations.filter((row) => row.request_id !== requestId && Date.now() - Date.parse(row.created_at) < 3 * 60 * 60 * 1000 && (row.status === "creating" || !ledger.settlements.some((payment) => payment.settlementId === `paypal_${row.order_id}`))).reduce((total, row) => total + row.amount_minor, 0);
+        const reserved = reservations.filter((row) => row.request_id !== requestId && Date.now() - Date.parse(row.created_at) < PAYPAL_APPROVAL_TTL_MS && (row.status === "creating" || !ledger.settlements.some((payment) => payment.settlementId === `paypal_${row.order_id}`))).reduce((total, row) => total + row.amount_minor, 0);
         const available = due - claimed - reserved;
         if (amount > available) throw Object.assign(new Error("Another checkout already reserves part of this obligation."), { status: 409 });
         if (previous) db.prepare("UPDATE paypal_order_requests SET amount_minor = ?, status = 'creating', created_at = ? WHERE session_id = ? AND request_id = ?").run(amount, new Date().toISOString(), sessionId, requestId);
@@ -363,9 +364,9 @@ async function route(req, res) {
       const appBase = (process.env.APP_BASE_URL ?? "http://127.0.0.1:4173").replace(/\/$/, "");
       try {
         const providerRequestId = `bl_${sha(requestId).slice(0, 32)}`;
-        const order = await paypalRequest("/v2/checkout/orders", { method: "POST", headers: { "PayPal-Request-Id": providerRequestId }, body: JSON.stringify({ intent: "CAPTURE", purchase_units: [{ reference_id: `${sessionId}:${body.fromMemberId}:${body.toMemberId}`, description: "Shared expense settlement", amount: { currency_code: "USD", value: `${Math.floor(amount / 100)}.${String(amount % 100).padStart(2, "0")}` }, ...(config.payee ? { payee: { merchant_id: config.payee } } : {}) }], application_context: { return_url: `${appBase}/?payment=return`, cancel_url: `${appBase}/?payment=cancel`, shipping_preference: "NO_SHIPPING", user_action: "PAY_NOW" } }) });
+        const order = await paypalRequest("/v2/checkout/orders", { method: "POST", headers: { "PayPal-Request-Id": providerRequestId }, body: JSON.stringify({ intent: "CAPTURE", purchase_units: [{ reference_id: `${sessionId}:${body.fromMemberId}:${body.toMemberId}`, description: "Shared expense settlement", amount: { currency_code: "USD", value: `${Math.floor(amount / 100)}.${String(amount % 100).padStart(2, "0")}` }, ...(config.payee ? { payee: { merchant_id: config.payee } } : {}) }], payment_source: { paypal: { experience_context: { return_url: `${appBase}/?payment=return`, cancel_url: `${appBase}/?payment=cancel`, shipping_preference: "NO_SHIPPING", user_action: "PAY_NOW" } } } }) });
         if (!order.id) throw Object.assign(new Error("PayPal did not return an order ID."), { status: 502 });
-        const approvalUrl = order.links?.find((link) => link.rel === "approve")?.href;
+        const approvalUrl = order.links?.find((link) => link.rel === "approve" || link.rel === "payer-action")?.href;
         if (!approvalUrl) throw Object.assign(new Error("PayPal returned no buyer approval link."), { status: 502 });
         const orderCreatedAt = new Date().toISOString();
         db.exec("BEGIN IMMEDIATE");
