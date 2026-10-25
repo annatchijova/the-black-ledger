@@ -280,6 +280,7 @@ async function route(req, res) {
       if (actor && event?.type === "EXPENSE_DISCREPANCY_RECORDED" && event.raisedByMemberId !== actor) return send(res, 403, { error: "A participant can only raise a discrepancy under their own name." });
       if (actor && event?.type === "SETTLEMENT_ASSERTED" && event.fromMemberId !== actor) return send(res, 403, { error: "A participant can only claim a payment they made." });
       if (actor && event?.type === "OBLIGATION_FORGIVEN" && event.creditorId !== actor) return send(res, 403, { error: "Only the creditor can forgive this obligation." });
+      if (event?.type === "OBLIGATION_FORGIVEN" && access.role === "witness") return send(res, 403, { error: "Read-only witnesses cannot change financial obligations." });
       if (actor && event?.type === "RESPONSIBILITY_ASSUMED" && event.toMemberId !== actor) return send(res, 403, { error: "The participant assuming responsibility must submit the event." });
       if (actor && event?.type === "COMMITMENT_RECORDED" && event.payerMemberId !== actor) return send(res, 403, { error: "A participant can only create their own commitment." });
       if (actor && ["COMMITMENT_UPDATED", "COMMITMENT_REFUND_RECORDED"].includes(event?.type) && before.commitments.find((item) => item.commitmentId === event.commitmentId)?.payerMemberId !== actor) return send(res, 403, { error: "Only the commitment payer can update or refund it." });

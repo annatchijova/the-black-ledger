@@ -282,10 +282,12 @@ function paymentPage(current) {
   const options = current.members.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("");
   const payerOptions = current.members.filter((member) => access.role !== "member" || member.id === access.memberId).map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("");
   const paypalButton = ledgerCurrency() === "USD" ? `<button class="button button-quiet" id="paypal-checkout" type="button">Pay through PayPal Sandbox</button>` : "";
+  const forgivenessRows = !current.archived && !readOnly ? current.outstanding.filter((item) => access.role !== "member" || item.creditorId === access.memberId).map((item) => `<form class="forgiveness-form" data-debtor="${h(item.debtorId)}" data-creditor="${h(item.creditorId)}" data-max="${item.amountMinor}"><b>${h(memberName(item.debtorId))} owes ${h(memberName(item.creditorId))}</b><small>Outstanding ${money(item.amountMinor)}</small><label>Forgive amount · ${h(ledgerCurrency())}<input name="amount" inputmode="decimal" required></label><label>Reason<input name="reason" maxlength="300" required></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record partial forgiveness</button></form>`).join("") : "";
   return `${header("The Elixir", "Record a claimed settlement without confusing it for provider proof.", "CHAMBER 04 · THE SETTLEMENT")}
     <section class="feature-card elixir-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/elixir-vial.png" alt=""></div><div><div class="eyebrow">THE VIAL OF DEBT</div><h2>A payment changes the account.</h2><p>A claimed transfer stays pending. Only recipient confirmation or a completed PayPal capture changes balances.</p></div><span class="coming-tag">VERIFIED STATES</span></section>
     ${!enough ? emptyState("Two witnesses are needed.", "Add at least two participants to record a settlement.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect payment states and confirm receipts addressed to you." : "Its settlement history remains available below."}</p></div></div>` : `<form class="form-panel payment-form" id="payment-form"><div class="form-heading"><div><div class="eyebrow">A CLAIM OF PAYMENT</div><h2>Record a settlement</h2></div><span class="form-index">04 / 05</span></div><div class="field-grid"><label>Who paid?<select name="from" required>${payerOptions}</select></label><label>Who received?<select name="to" required>${options}</select></label><label>Amount <span class="field-hint">${h(ledgerCurrency())}</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label></div><div class="honesty-note"><span>i</span><p><b>This remains a pending claim.</b> It does not reduce balances until the recipient confirms the transfer or PayPal reports a completed capture.</p></div><div class="form-footer"><p>A claim must match an outstanding obligation between these participants.</p><div><button class="button button-gold" type="submit">Record pending claim <span>↗</span></button>${paypalButton}</div></div></form>`}
-    <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">PAYMENT RECORD</div><h2>Settlements recorded</h2></div><span class="count">${current.settlements.length} entries</span></div>${current.settlements.length ? `<div class="expense-list">${[...current.settlements].reverse().map((event) => `<article class="expense-row"><span class="row-icon payment-icon">♢</span><span class="expense-meta"><b>${h(memberName(event.fromId))} → ${h(memberName(event.toId))}</b><small>${h(event.status ?? "recorded")} · ${eventDate(event.at)}</small></span><strong>${money(event.cents)}</strong>${event.status === "pending" && event.rail !== "paypal" && event.toId === access.memberId ? `<button type="button" class="button button-quiet confirm-payment" data-settlement-id="${h(event.settlementId)}">Confirm receipt</button>` : ""}</article>`).join("")}</div>` : emptyState("No settlement has been recorded.", "A claimed payment will be listed here.", "#payments", "Record a settlement")}</section>`;
+    <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">PAYMENT RECORD</div><h2>Settlements recorded</h2></div><span class="count">${current.settlements.length} entries</span></div>${current.settlements.length ? `<div class="expense-list">${[...current.settlements].reverse().map((event) => `<article class="expense-row"><span class="row-icon payment-icon">♢</span><span class="expense-meta"><b>${h(memberName(event.fromId))} → ${h(memberName(event.toId))}</b><small>${h(event.status ?? "recorded")} · ${eventDate(event.at)}</small></span><strong>${money(event.cents)}</strong>${event.status === "pending" && event.rail !== "paypal" && event.toId === access.memberId ? `<button type="button" class="button button-quiet confirm-payment" data-settlement-id="${h(event.settlementId)}">Confirm receipt</button>` : ""}</article>`).join("")}</div>` : emptyState("No settlement has been recorded.", "A claimed payment will be listed here.", "#payments", "Record a settlement")}</section>
+    ${forgivenessRows ? `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">A DEBT RELEASED</div><h2>Partial forgiveness</h2></div></div><p>A creditor may forgive part of an outstanding obligation. This is recorded separately from a payment and never implies money changed hands.</p><div class="forgiveness-list">${forgivenessRows}</div></section>` : ""}`;
 }
 
 function verdictPage(current) {
@@ -652,6 +654,21 @@ function bindPage(current) {
       location.assign(result.approvalUrl);
     } catch (error) { showToast(error.message); }
   });
+
+  document.querySelectorAll(".forgiveness-form").forEach((form) => form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const data = new FormData(form);
+      const amountMinor = parseLedgerAmount(data.get("amount"));
+      if (amountMinor > Number(form.dataset.max)) throw new Error("Forgiveness cannot exceed the remaining obligation.");
+      const saved = commitFromForm(form, "OBLIGATION_FORGIVEN", { debtorId: form.dataset.debtor, creditorId: form.dataset.creditor, amountMinor, reason: String(data.get("reason")).trim() }, "Partial forgiveness recorded. No payment was created.");
+      void saved;
+    } catch (error) {
+      const output = form.querySelector("[data-action-error]");
+      output.textContent = error.message;
+      output.hidden = false;
+    }
+  }));
 }
 
 function render() {

@@ -1132,3 +1132,23 @@ margin:8px 0;
 white-space:pre-wrap}
 .agreement-list small{
 color:var(--muted)}
+
+.forgiveness-list{
+display:grid;
+gap:12px}
+.forgiveness-form{
+display:grid;
+grid-template-columns:repeat(2,minmax(0,1fr));
+align-items:end;
+gap:12px;
+padding:16px;
+border:1px solid var(--line)}
+.forgiveness-form>b,.forgiveness-form>small,.forgiveness-form output{
+grid-column:1/-1}
+.forgiveness-form label{
+display:grid;
+gap:6px;
+color:var(--muted);
+font-size:10px}
+.forgiveness-form input{width:100%}
+@media(max-width:650px){.forgiveness-form{grid-template-columns:1fr}}
