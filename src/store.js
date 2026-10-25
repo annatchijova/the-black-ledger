@@ -7,6 +7,7 @@ const api = (sessionId = "") => `/api/sessions${sessionId ? `/${encodeURICompone
 const updates = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("the-black-ledger-sync-v1");
 let appendWarnings = [];
 let accessContext = { role: "organizer", memberId: null };
+const eventBaseCurrency = (events) => events.find((event) => event.type === "SESSION_CREATED")?.baseCurrency ?? "USD";
 
 async function request(path, options) {
   const accessToken = localStorage.getItem(TOKEN_KEY);
@@ -28,7 +29,7 @@ export async function loadLedger() {
     try {
       const response = await request(api(sessionId));
       accessContext = response.access ?? { role: "organizer", memberId: null };
-      let events = parseEventLog(response.events);
+      let events = parseEventLog(response.events, eventBaseCurrency(response.events));
       const oldRaw = invite ? null : localStorage.getItem(LEGACY_KEY);
       if (oldRaw !== null && accessContext.role === "organizer") {
         const legacy = parseEventLog(JSON.parse(oldRaw));
@@ -41,7 +42,7 @@ export async function loadLedger() {
           }
         }
       }
-      return parseEventLog(events);
+      return parseEventLog(events, eventBaseCurrency(events));
     }
     catch (error) {
       const message = String(error.message);
@@ -66,7 +67,7 @@ export async function loadLedger() {
       events.push(result.event);
     }
   }
-  return parseEventLog(events);
+  return parseEventLog(events, eventBaseCurrency(events));
 }
 
 function migrateEvents(event) {
@@ -83,15 +84,17 @@ export function getAccessContext() { return { ...accessContext }; }
 export async function appendEvent(currentEvents, type, fields) {
   const sessionId = localStorage.getItem(SESSION_KEY);
   if (!sessionId) throw new Error("This ledger has not finished connecting to shared storage.");
-  const current = deriveLedger(currentEvents);
+  const baseCurrency = eventBaseCurrency(currentEvents);
+  const current = deriveLedger(currentEvents, { baseCurrency });
   if (current.archived) throw new Error("This journey is archived and read-only.");
   const event = makeEvent(type, fields);
   const candidate = [...currentEvents, event];
-  deriveLedger(candidate);
+  deriveLedger(candidate, { baseCurrency });
   const result = await request(`${api(sessionId)}/events`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ event }) });
   appendWarnings = result.possibleDuplicates ?? [];
   updates?.postMessage({ sessionId, eventId: result.event.id });
-  return parseEventLog([...(currentEvents.filter((item) => item.id !== event.id)), result.event]);
+  const nextEvents = [...(currentEvents.filter((item) => item.id !== event.id)), result.event];
+  return parseEventLog(nextEvents, baseCurrency);
 }
 
 export function takeAppendWarnings() {

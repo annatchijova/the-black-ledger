@@ -1,12 +1,29 @@
-import { parseAmountToMinor, formatMoney, divideMinorUnits, sumMinor } from "./domain/money.js";
+import { parseAmountToMinor, formatMoney, divideMinorUnits, sumMinor, SUPPORTED_CURRENCIES } from "./domain/money.js";
 import { validateEvent, parseEventLog, normalizeExpense, makeEvent } from "./domain/events.js";
 import { canonicalStringify } from "./domain/canonical.js";
 
-export { parseAmountToMinor, formatMoney, divideMinorUnits, sumMinor, parseEventLog, makeEvent };
+export { parseAmountToMinor, formatMoney, divideMinorUnits, sumMinor, SUPPORTED_CURRENCIES, parseEventLog, makeEvent };
 export { parseAmountToCents } from "./domain/money.js";
 
 const add = (map, key, value) => map.set(key, (map.get(key) ?? 0) + value);
 const keyOf = (a, b) => `${a}\0${b}`;
+
+function allocateWeightedMinor(totalMinor, rows) {
+  const weights = rows.map((row) => BigInt(row.baseMinor));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0n);
+  if (totalWeight <= 0n) throw new Error("Cannot allocate an amount across zero-value shares.");
+  const parts = rows.map((row, index) => {
+    const numerator = BigInt(totalMinor) * weights[index];
+    return { memberId: row.memberId, baseMinor: numerator / totalWeight, remainder: numerator % totalWeight, index };
+  });
+  let remainder = BigInt(totalMinor) - parts.reduce((sum, part) => sum + part.baseMinor, 0n);
+  for (const part of [...parts].sort((a, b) => a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1)) {
+    if (remainder === 0n) break;
+    part.baseMinor += 1n;
+    remainder -= 1n;
+  }
+  return parts.map(({ memberId, baseMinor }) => ({ memberId, baseMinor: Number(baseMinor) }));
+}
 
 function closureBlockers(state) {
   const blockers = [];
@@ -68,7 +85,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
       }
       case "EXPENSE_RECORDED": case "EXPENSE_UNASSIGNED": {
         const expense = normalizeExpense(event, baseCurrency); if (expenses.has(expense.id)) throw new Error("Expense IDs must be unique.");
-        if (expense.status !== "unassigned" && (!members.has(expense.payerId) || expense.allocations.some((row) => !members.has(row.memberId)))) throw new Error("An expense must refer to participants already in this ledger.");
+        if (expense.status !== "unassigned" && (!members.has(expense.payerId) || expense.allocations.some((row) => !members.has(row.memberId)) || expense.fx?.feeMinor > 0 && !members.has(expense.fx.feePayerMemberId))) throw new Error("An expense must refer to participants already in this ledger.");
         if (expense.groupIds.some((groupId) => !groups.has(groupId))) throw new Error("An expense refers to an unknown subgroup.");
         if (expense.evidenceIds.some((evidenceId) => !evidence.has(evidenceId))) throw new Error("An expense refers to evidence that has not been attached to this ledger.");
         if (expense.commitmentId && (!commitments.has(expense.commitmentId) || commitments.get(expense.commitmentId).status !== "open" || [...expenses.values()].some((prior) => prior.commitmentId === expense.commitmentId))) throw new Error("A commitment can be converted to one expense only while it is open.");
@@ -195,9 +212,15 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
     if (superseded.has(expense.sourceEventId) || expense.status === "unassigned") continue;
     if (!members.has(expense.payerId)) throw new Error("An expense refers to an unknown payer.");
     if (expense.allocations.some((row) => !members.has(row.memberId))) throw new Error("An expense refers to an unknown participant.");
-    for (const row of expense.allocations) {
-      if (row.memberId === expense.payerId) continue;
-      add(pairObligations, keyOf(row.memberId, expense.payerId), row.baseMinor);
+    const feeMinor = expense.fx?.feeMinor ?? 0;
+    const feePayerId = feeMinor > 0 ? expense.fx.feePayerMemberId : expense.payerId;
+    const feeShares = feeMinor > 0 && feePayerId !== expense.payerId ? allocateWeightedMinor(feeMinor, expense.allocations) : expense.allocations.map((row) => ({ memberId: row.memberId, baseMinor: 0 }));
+    for (let index = 0; index < expense.allocations.length; index++) {
+      const row = expense.allocations[index];
+      const feeShare = feeShares[index].baseMinor;
+      const purchaseShare = row.baseMinor - feeShare;
+      if (row.memberId !== expense.payerId && purchaseShare > 0) add(pairObligations, keyOf(row.memberId, expense.payerId), purchaseShare);
+      if (row.memberId !== feePayerId && feeShare > 0) add(pairObligations, keyOf(row.memberId, feePayerId), feeShare);
     }
   }
   for (const item of carried) add(pairObligations, keyOf(item.debtorId, item.creditorId), item.amountMinor);

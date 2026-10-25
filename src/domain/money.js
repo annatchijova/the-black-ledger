@@ -6,6 +6,7 @@ const EXPONENTS = Object.freeze({
   EGP: 2, NGN: 2, KES: 2, MAD: 2, ISK: 0
 });
 const MAX_MINOR = 1_000_000_000_000;
+export const SUPPORTED_CURRENCIES = Object.freeze(Object.keys(EXPONENTS).sort());
 
 export function currencyExponent(currency) {
   if (typeof currency !== "string" || !(currency.toUpperCase() in EXPONENTS)) {
