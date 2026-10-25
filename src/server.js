@@ -270,7 +270,7 @@ async function route(req, res) {
       if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,120}$/.test(requestId)) return send(res, 400, { error: "A valid Idempotency-Key header is required." });
       const body = await readJson(req); const event = body.event;
       const before = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
-      const organizerOnly = new Set(["MEMBER_ADDED", "MEMBER_INVITED", "MEMBER_STATUS_CHANGED", "GROUP_CREATED", "GROUP_MEMBERS_CHANGED", "EXPENSE_CORRECTED", "EXPENSE_DISCREPANCY_RESOLVED", "SETTLEMENT_REVERSED", "SETTLEMENT_STATUS_RECORDED", "SETTLEMENT_REFUNDED", "SESSION_CLOSED_PROVISIONAL", "SESSION_CLOSED_FINAL", "SESSION_REOPENED", "SESSION_ARCHIVED", "SESSION_RULES_RECORDED", "BUDGET_SET", "RECURRING_RULE_APPROVED", "RECURRING_INSTANCE_RECORDED", "SURPRISE_GIFT_RECORDED"]);
+      const organizerOnly = new Set(["MEMBER_ADDED", "MEMBER_INVITED", "MEMBER_JOINED", "MEMBER_STATUS_CHANGED", "GROUP_CREATED", "GROUP_MEMBERS_CHANGED", "EXPENSE_CORRECTED", "EXPENSE_DISCREPANCY_RESOLVED", "SETTLEMENT_REVERSED", "SETTLEMENT_STATUS_RECORDED", "SETTLEMENT_REFUNDED", "SESSION_CLOSED_PROVISIONAL", "SESSION_CLOSED_FINAL", "SESSION_REOPENED", "SESSION_ARCHIVED", "SESSION_RULES_RECORDED", "BUDGET_SET", "RECURRING_RULE_APPROVED", "RECURRING_INSTANCE_RECORDED", "SURPRISE_GIFT_RECORDED"]);
       if (organizerOnly.has(event?.type) && access.role !== "organizer") return send(res, 403, { error: "This ledger action is restricted to its organizer." });
       const actor = access.member_id;
       if (actor && before.members.find((member) => member.id === actor)?.status !== "active") return send(res, 403, { error: "Departed or removed participants cannot change this ledger." });

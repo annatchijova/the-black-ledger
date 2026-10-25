@@ -12,6 +12,10 @@ npm run dev
 
 Open `http://127.0.0.1:4173`. Copy `.env.example` to `.env` to configure integrations. Set `LEDGER_DATA_DIR` to choose where the SQLite database is stored, `PORT` to change the port, and `HOST=0.0.0.0` when the app must accept connections from other devices.
 
+## Verify changes
+
+Run the automated API security checks with `npm test`. The security test starts an isolated local server and stores its SQLite database in a temporary directory. It does not contact PayPal or the OpenAI API.
+
 ## Current implementation
 
 - Exact money parsing, rational FX conversion with half-even rounding, and deterministic remainder allocation.
@@ -52,3 +56,5 @@ Receipt interpretation and scenario language can only produce proposals. A perso
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The threat model and latest adversarial review are documented in [the security audit](docs/SECURITY-AUDIT-2026-10-25.md).
