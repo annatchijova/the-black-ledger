@@ -125,6 +125,7 @@ export function normalizeExpense(event, baseCurrency = "USD") {
     anonymousPayer: event.anonymousPayer === true,
     commitmentId: event.commitmentId ?? null,
     recurringRuleId: event.recurringRuleId ?? null,
+    recurringPeriodKey: event.recurringPeriodKey ?? null,
     sourceEventId: event.id,
     at: event.at
   };
@@ -172,6 +173,10 @@ export function validateEvent(event, baseCurrency = "USD") {
     case "EXPENSE_RECORDED":
     case "EXPENSE_UNASSIGNED":
       normalizeExpense(event, baseCurrency);
+      if (event.recurringRuleId != null) {
+        requireId(event.recurringRuleId, "Recurring-rule ID");
+        requireText(event.recurringPeriodKey, "Recurring period key", 40);
+      } else if (event.recurringPeriodKey != null) fail("A recurring period key requires a recurring-rule ID.");
       break;
     case "EXPENSE_CORRECTED":
       requireId(event.expenseId, "Expense ID"); requireId(event.supersedesEventId, "Superseded event ID"); requireText(event.reason, "Correction reason", 500);

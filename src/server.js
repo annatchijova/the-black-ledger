@@ -274,6 +274,7 @@ async function route(req, res) {
       if (organizerOnly.has(event?.type) && access.role !== "organizer") return send(res, 403, { error: "This ledger action is restricted to its organizer." });
       const actor = access.member_id;
       if (actor && before.members.find((member) => member.id === actor)?.status !== "active") return send(res, 403, { error: "Departed or removed participants cannot change this ledger." });
+      if (actor && event?.type === "EXPENSE_RECORDED" && event.recurringRuleId) return send(res, 403, { error: "Only the organizer can generate an expense from an approved recurring rule." });
       if (actor && event?.type === "EXPENSE_RECORDED" && (event.paidByMemberId ?? event.payerId) !== actor) return send(res, 403, { error: "A participant can only enter an expense they paid." });
       if (actor && event?.type === "MEMBER_CONFIRMED_EXPENSE" && event.memberId !== actor) return send(res, 403, { error: "A participant can only confirm their own expense allocation." });
       if (actor && event?.type === "EXPENSE_DISCREPANCY_RECORDED" && event.raisedByMemberId !== actor) return send(res, 403, { error: "A participant can only raise a discrepancy under their own name." });

@@ -89,6 +89,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         if (expense.groupIds.some((groupId) => !groups.has(groupId))) throw new Error("An expense refers to an unknown subgroup.");
         if (expense.evidenceIds.some((evidenceId) => !evidence.has(evidenceId))) throw new Error("An expense refers to evidence that has not been attached to this ledger.");
         if (expense.commitmentId && (!commitments.has(expense.commitmentId) || commitments.get(expense.commitmentId).status !== "open" || [...expenses.values()].some((prior) => prior.commitmentId === expense.commitmentId))) throw new Error("A commitment can be converted to one expense only while it is open.");
+        if (expense.recurringRuleId && (!recurringRules.has(expense.recurringRuleId) || !expense.recurringPeriodKey || recurringPeriods.has(`${expense.recurringRuleId}:${expense.recurringPeriodKey}`) || [...expenses.values()].some((prior) => prior.recurringRuleId === expense.recurringRuleId && prior.recurringPeriodKey === expense.recurringPeriodKey))) throw new Error("A recurring expense needs an approved rule and a unique period.");
         expenses.set(expense.id, { ...expense, eventId: event.id }); break;
       }
       case "EXPENSE_CORRECTED": {
@@ -179,6 +180,8 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         recurringRules.set(event.ruleId, event); break;
       case "RECURRING_INSTANCE_RECORDED": {
         if (!recurringRules.has(event.ruleId)) throw new Error("Recurring instance references an unapproved rule.");
+        const expenseEvent = eventById.get(event.expenseEventId);
+        if (!expenseEvent || expenseEvent.type !== "EXPENSE_RECORDED" || expenseEvent.recurringRuleId !== event.ruleId || expenseEvent.recurringPeriodKey !== event.periodKey) throw new Error("A recurring instance must reference its matching recorded expense.");
         const key = `${event.ruleId}:${event.periodKey}`; if (recurringPeriods.has(key)) throw new Error("A recurring rule can create only one instance per period.");
         recurringPeriods.add(key); break;
       }

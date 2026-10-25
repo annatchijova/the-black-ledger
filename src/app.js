@@ -114,7 +114,22 @@ function expensePage(current) {
     <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map((expense) => expenseRow(expense, current)).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>
     ${commitmentSection(current)}
     ${giftSection(current)}
-    ${budgetSection(current)}`;
+    ${budgetSection(current)}
+    ${recurringSection(current)}`;
+}
+
+function recurringSection(current) {
+  const canManage = getAccessContext().role === "organizer" && !current.archived;
+  const participantChecks = current.members.filter((member) => (member.status ?? "active") === "active").map((member) => `<label class="check-row"><input type="checkbox" name="recurringMember" value="${h(member.id)}" checked><span>${h(member.name)}</span></label>`).join("");
+  const activePayers = current.members.filter((member) => (member.status ?? "active") === "active").map((member) => `<option value="${h(member.id)}">${h(member.name)}</option>`).join("");
+  const createForm = canManage ? `<form class="form-panel" id="recurring-rule-form"><div class="eyebrow">REPEATING OBLIGATION</div><h2>Approve a recurring expense</h2><div class="field-grid"><label>Description<input name="description" maxlength="180" required></label><label>Expected amount · ${h(ledgerCurrency())}<input name="amount" inputmode="decimal" required></label><label>Cadence<input name="cadence" maxlength="40" placeholder="Monthly" required></label></div><fieldset class="beneficiary-fieldset"><legend>Default allocation</legend><div class="check-grid">${participantChecks}</div></fieldset><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Approve recurring rule</button></form>` : "";
+  const rules = current.recurringRules.map((rule) => {
+    const periods = current.recurringPeriods.filter((entry) => entry.startsWith(`${rule.ruleId}:`)).map((entry) => entry.slice(rule.ruleId.length + 1));
+    const recorded = periods.length ? periods.map((period) => `<span class="count">${h(period)}</span>`).join(" ") : "No periods recorded";
+    const generateForm = canManage && activePayers ? `<form class="recurring-instance-form" data-rule-id="${h(rule.ruleId)}"><label>Period key<input name="periodKey" maxlength="40" placeholder="2026-10" required></label><label>Paid by<select name="payerMemberId" required>${activePayers}</select></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record this period</button></form>` : "";
+    return `<article class="recurring-row"><div><b>${h(rule.description)}</b><small>${h(rule.cadence)} · ${rule.allocations.length} allocated participants · ${money(rule.amountMinor)}</small></div><div class="recurring-periods"><small>Recorded periods:</small> ${recorded}</div>${generateForm}</article>`;
+  }).join("");
+  return `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE CLOCKWORK ACCOUNT</div><h2>Recurring expenses</h2></div><span class="count">${current.recurringRules.length} rules</span></div>${createForm}${rules ? `<div class="recurring-list">${rules}</div>` : `<p class="empty-inline">No recurring expenses have been approved.</p>`}</section>`;
 }
 
 function budgetSection(current) {
@@ -431,6 +446,48 @@ function bindPage(current) {
       output.hidden = false;
     }
   });
+
+  const recurringRuleForm = document.querySelector("#recurring-rule-form");
+  recurringRuleForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const data = new FormData(recurringRuleForm);
+      const amountMinor = parseLedgerAmount(data.get("amount"));
+      const memberIds = data.getAll("recurringMember");
+      if (!memberIds.length) throw new Error("Select at least one participant for the recurring allocation.");
+      const base = Math.floor(amountMinor / memberIds.length);
+      let remainder = amountMinor - base * memberIds.length;
+      const allocations = memberIds.map((memberId) => ({ memberId, cents: base + (remainder-- > 0 ? 1 : 0) }));
+      commitFromForm(recurringRuleForm, "RECURRING_RULE_APPROVED", { ruleId: crypto.randomUUID(), description: String(data.get("description")).trim(), amountMinor, allocations, cadence: String(data.get("cadence")).trim() }, "Recurring rule approved. Each period still needs an explicit recorded expense.");
+    } catch (error) {
+      const output = recurringRuleForm.querySelector("[data-action-error]");
+      output.textContent = error.message;
+      output.hidden = false;
+    }
+  });
+
+  document.querySelectorAll(".recurring-instance-form").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const ruleId = form.dataset.ruleId;
+    const periodKey = String(data.get("periodKey")).trim();
+    const rule = current.recurringRules.find((item) => item.ruleId === ruleId);
+    const alreadyRecorded = current.recurringPeriods.includes(`${ruleId}:${periodKey}`);
+    if (!rule || alreadyRecorded) {
+      const output = form.querySelector("[data-action-error]");
+      output.textContent = alreadyRecorded ? "This rule already has an expense recorded for that period." : "This recurring rule is no longer available.";
+      output.hidden = false;
+      return;
+    }
+    let expenseEvent = events.find((item) => item.type === "EXPENSE_RECORDED" && item.recurringRuleId === ruleId && item.recurringPeriodKey === periodKey);
+    if (!expenseEvent) {
+      const expenseEventId = crypto.randomUUID();
+      const saved = await commitFromForm(form, "EXPENSE_RECORDED", { id: expenseEventId, expenseId: expenseEventId, description: rule.description, payerId: data.get("payerMemberId"), amountMinor: rule.amountMinor, currency: ledgerCurrency(), baseAmountMinor: rule.amountMinor, totalCents: rule.amountMinor, allocations: rule.allocations, recurringRuleId: ruleId, recurringPeriodKey: periodKey }, `Recurring expense for ${periodKey} recorded.`);
+      if (!saved) return;
+      expenseEvent = events.find((item) => item.id === expenseEventId);
+    }
+    commitFromForm(form, "RECURRING_INSTANCE_RECORDED", { ruleId, periodKey, expenseEventId: expenseEvent.id }, `Recurring period ${periodKey} sealed into the ledger.`);
+  }));
 
   document.querySelectorAll(".commitment-refund-form").forEach((form) => form.addEventListener("submit", (event) => {
     event.preventDefault();

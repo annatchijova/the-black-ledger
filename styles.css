@@ -1078,3 +1078,36 @@ scroll-behavior:auto!important;
 transition:none!important;
 animation:none!important}
 }
+
+.recurring-list{
+display:grid;
+gap:12px}
+.recurring-row{
+display:grid;
+grid-template-columns:minmax(0,1fr) minmax(150px,auto) minmax(220px,1fr);
+align-items:center;
+gap:16px;
+padding:16px;
+border:1px solid var(--line);
+background:rgba(255,255,255,.018)}
+.recurring-row>div:first-child,.recurring-periods{
+display:grid;
+gap:6px}
+.recurring-row small{
+color:var(--muted)}
+.recurring-instance-form{
+display:flex;
+align-items:end;
+gap:10px}
+.recurring-instance-form label{
+display:grid;
+gap:6px;
+flex:1;
+color:var(--muted);
+font-size:10px}
+.recurring-instance-form input,.recurring-instance-form select{
+min-width:0;
+width:100%}
+@media(max-width:850px){
+.recurring-row{grid-template-columns:1fr}
+.recurring-instance-form{align-items:stretch;flex-direction:column}}
