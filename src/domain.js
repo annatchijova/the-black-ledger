@@ -108,9 +108,12 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         if (expense.status !== "unassigned" && expense.payerId !== event.memberId && !expense.allocations.some((row) => row.memberId === event.memberId)) throw new Error("Participants can only confirm expenses assigned to them.");
         confirmations.set(`${event.expenseId}:${event.memberId}`, event); break;
       }
-      case "EXPENSE_DISCREPANCY_RECORDED":
-        if (!expenses.has(event.expenseId) || !members.has(event.raisedByMemberId) || discrepancies.has(event.discrepancyId)) throw new Error("A discrepancy must point to a known expense, participant, and unique ID.");
+      case "EXPENSE_DISCREPANCY_RECORDED": {
+        const expense = expenses.get(event.expenseId);
+        if (!expense || !members.has(event.raisedByMemberId) || discrepancies.has(event.discrepancyId)) throw new Error("A discrepancy must point to a known expense, participant, and unique ID.");
+        if (expense.status === "unassigned" || (expense.payerId !== event.raisedByMemberId && !expense.allocations.some((row) => row.memberId === event.raisedByMemberId))) throw new Error("A participant can only dispute an expense they paid for or were assigned.");
         discrepancies.set(event.discrepancyId, { ...event }); break;
+      }
       case "EXPENSE_DISCREPANCY_RESOLVED": {
         const discrepancy = discrepancies.get(event.discrepancyId); if (!discrepancy) throw new Error("Discrepancy resolution references an unknown issue.");
         discrepancies.set(event.discrepancyId, { ...discrepancy, resolution: event.resolution, resolvedAt: event.at }); break;

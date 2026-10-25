@@ -278,6 +278,10 @@ async function route(req, res) {
       if (actor && event?.type === "EXPENSE_RECORDED" && (event.paidByMemberId ?? event.payerId) !== actor) return send(res, 403, { error: "A participant can only enter an expense they paid." });
       if (actor && event?.type === "MEMBER_CONFIRMED_EXPENSE" && event.memberId !== actor) return send(res, 403, { error: "A participant can only confirm their own expense allocation." });
       if (actor && event?.type === "EXPENSE_DISCREPANCY_RECORDED" && event.raisedByMemberId !== actor) return send(res, 403, { error: "A participant can only raise a discrepancy under their own name." });
+      if (actor && event?.type === "EXPENSE_DISCREPANCY_RECORDED") {
+        const expense = before.expenses.find((item) => item.id === event.expenseId);
+        if (!expense || expense.status === "unassigned" || (expense.payerId !== actor && !expense.allocations.some((row) => row.memberId === actor))) return send(res, 403, { error: "A participant can only dispute an expense they paid for or were assigned." });
+      }
       if (actor && event?.type === "SETTLEMENT_ASSERTED" && event.fromMemberId !== actor) return send(res, 403, { error: "A participant can only claim a payment they made." });
       if (actor && event?.type === "OBLIGATION_FORGIVEN" && event.creditorId !== actor) return send(res, 403, { error: "Only the creditor can forgive this obligation." });
       if (event?.type === "OBLIGATION_FORGIVEN" && access.role === "witness") return send(res, 403, { error: "Read-only witnesses cannot change financial obligations." });

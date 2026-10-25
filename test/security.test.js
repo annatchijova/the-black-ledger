@@ -17,7 +17,7 @@ async function availablePort() {
   return port;
 }
 
-test("a participant cannot reactivate a departed participant with MEMBER_JOINED", async (t) => {
+test("API enforces participant authorization and confidential gift visibility", async (t) => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "black-ledger-red-team-"));
   const port = await availablePort();
   const child = spawn(process.execPath, ["--experimental-sqlite", "src/server.js"], {
@@ -115,4 +115,24 @@ test("a participant cannot reactivate a departed participant with MEMBER_JOINED"
   const recipientView = await fetch(`${origin}/api/sessions/${session.sessionId}`, { headers: { authorization: `Bearer ${recipient.accessToken}` } });
   assert.equal(recipientView.status, 200);
   assert.equal(JSON.stringify(await recipientView.json()).includes(secret), false, "the gift recipient must not receive the private description through either events or derived state");
+
+  const expenseId = randomUUID();
+  const expense = await addEvent(session.accessToken, {
+    id: expenseId, expenseId, at: timestamp(), type: "EXPENSE_RECORDED", description: "A charge assigned to one person",
+    payerId: attacker.memberId, amountMinor: 500, currency: "USD", baseAmountMinor: 500,
+    allocations: [{ memberId: attacker.memberId, cents: 500 }]
+  });
+  assert.equal(expense.status, 201);
+  const assignedDispute = await addEvent(attacker.accessToken, {
+    id: randomUUID(), at: timestamp(), type: "EXPENSE_DISCREPANCY_RECORDED",
+    expenseId, discrepancyId: randomUUID(), raisedByMemberId: attacker.memberId,
+    claim: "The amount needs review"
+  });
+  assert.equal(assignedDispute.status, 201, "a participant assigned to the expense retains the discrepancy path");
+  const unrelatedDispute = await addEvent(recipient.accessToken, {
+    id: randomUUID(), at: timestamp(), type: "EXPENSE_DISCREPANCY_RECORDED",
+    expenseId, discrepancyId: randomUUID(), raisedByMemberId: recipient.memberId,
+    claim: "I was not part of this expense"
+  });
+  assert.equal(unrelatedDispute.status, 403, "a participant not assigned to an expense must not be able to dispute it");
 });
