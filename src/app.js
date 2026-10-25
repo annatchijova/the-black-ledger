@@ -112,7 +112,19 @@ function expensePage(current) {
     ${!current.archived && !readOnly ? `<section class="form-panel"><label for="receipt-image">Receipt image</label><div class="input-row"><input id="receipt-image" type="file" accept="image/jpeg,image/png,image/webp"><button class="button button-quiet" id="analyze-receipt" type="button">Propose receipt details</button></div><pre id="receipt-proposal" hidden aria-live="polite"></pre></section>` : ""}
     ${!enough ? emptyState("The table is empty.", "Enter at least one participant before recording a cost.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect the expenses and their evidence." : "Start another ledger to record new expenses."}</p></div></div>` : `<form class="form-panel expense-form" id="expense-form"><div class="form-heading"><div><div class="eyebrow">A NEW ENTRY</div><h2>Record an expense</h2></div><span class="form-index">02 / 05</span></div><div class="field-grid"><label>Description<input name="description" maxlength="120" placeholder="Dinner, train tickets…" required></label><label>Receipt currency<select name="currency" id="expense-currency">${currencyOptions}</select></label><label><span id="source-total-label">Total amount · ${h(ledgerCurrency())}</span><input name="amount" inputmode="decimal" required></label><label>Paid by<select name="payer" required><option value="unassigned">Unknown / unassigned</option>${payerOptions.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("")}</select></label><label>Allocation rule<select name="splitMode" id="split-mode"><option value="equal">Split equally</option><option value="custom">Enter each share</option></select></label>${groupOptions ? `<label>Apply a subgroup<select name="group" id="expense-group"><option value="">All participants</option>${groupOptions}</select></label>` : ""}</div><fieldset id="fx-fields" class="form-panel fx-fields" hidden><legend>Conversion evidence · target ${h(ledgerCurrency())}</legend><div class="field-grid"><label>Ledger total · ${h(ledgerCurrency())}<input name="baseAmount" inputmode="decimal"></label><label>${h(ledgerCurrency())} per 1 <span id="fx-source-currency">foreign unit</span><input name="fxRate" inputmode="decimal" placeholder="1.08"></label><label>Rate source<input name="fxSource" maxlength="120" placeholder="Card statement, exchange receipt…"></label><label>Rate observed at<input name="fxObservedAt" type="datetime-local"></label><label>Conversion fee · ${h(ledgerCurrency())}<input name="fxFee" inputmode="decimal" value="0"></label><label>Fee paid by<select name="fxFeePayer"><option value="">No conversion fee</option>${feePayerOptions}</select></label></div><p class="field-hint">Enter the rate as an exact decimal. The converted total and fee must reconcile to the ledger total.</p></fieldset><fieldset class="beneficiary-fieldset"><legend>Who benefited from this expense?</legend><div class="check-grid">${rows}</div></fieldset><div id="custom-shares" class="custom-shares" hidden></div><div class="form-footer"><p>Shares reconcile to the ledger total. Unknown charges stay unassigned until identified.</p><button class="button button-gold" type="submit">Write into the ledger <span>↗</span></button></div></form>`}
     <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map((expense) => expenseRow(expense, current)).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>
-    ${commitmentSection(current)}`;
+    ${commitmentSection(current)}
+    ${giftSection(current)}`;
+}
+
+function giftSection(current) {
+  const access = getAccessContext();
+  const canCreate = access.role === "organizer" && !current.archived && current.members.length >= 2;
+  const defaultRecipient = current.members[0]?.id;
+  const recipients = current.members.map((member) => `<option value="${h(member.id)}" ${member.id === defaultRecipient ? "selected" : ""}>${h(member.name)}</option>`).join("");
+  const payers = current.members.filter((member) => member.id !== defaultRecipient).map((member) => `<option value="${h(member.id)}">${h(member.name)}</option>`).join("");
+  const contributors = current.members.map((member) => `<label class="check-row"><input type="checkbox" name="giftContributor" value="${h(member.id)}" ${member.id === defaultRecipient ? "" : "checked"}><span>${h(member.name)}</span></label>`).join("");
+  const form = canCreate ? `<form class="form-panel" id="gift-form"><div class="eyebrow">THE PACT OF SILENCE</div><h2>Record a surprise gift</h2><div class="field-grid"><label>Private description<input name="description" maxlength="240" required></label><label>Amount <span class="field-hint">${h(ledgerCurrency())}</span><input name="amount" inputmode="decimal" required></label><label>Recipient<select name="recipient" id="gift-recipient" required>${recipients}</select></label><label>Who paid upfront?<select name="payer" id="gift-payer" required>${payers}</select></label></div><fieldset class="beneficiary-fieldset"><legend>Who contributed? The recipient cannot be included.</legend><div class="check-grid">${contributors}</div></fieldset><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record privately</button><p class="field-hint">The recipient sees a confidential entry; other ledger participants can review its description and contributions.</p></form>` : "";
+  return `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PACT OF SILENCE</div><h2>Surprise gifts</h2></div><span class="count">${current.gifts.length} records</span></div>${form}${!current.gifts.length ? `<p class="empty-inline">No surprise gifts have been recorded.</p>` : `<div class="member-list">${current.gifts.map((gift) => `<article class="member-row"><span class="avatar">✳</span><span class="member-name"><b>${access.memberId === gift.recipientMemberId ? "Confidential surprise gift" : h(gift.privateDescription)}</b><small>For ${h(current.members.find((member) => member.id === gift.recipientMemberId)?.name ?? "Unknown participant")} · ${gift.contributions.length} contributor${gift.contributions.length === 1 ? "" : "s"}</small></span><strong>${money(gift.amountMinor)}</strong></article>`).join("")}</div>`}</section>`;
 }
 
 function commitmentSection(current) {
@@ -351,6 +363,41 @@ function bindPage(current) {
       commitFromForm(form, "COMMITMENT_RECORDED", { commitmentId: crypto.randomUUID(), description: String(data.get("description")).trim(), amountMinor, payerMemberId: data.get("payer"), allocations, refundability: data.get("refundability") }, "Commitment recorded; its final cost remains separate from expenses.");
     } catch (error) {
       const output = event.currentTarget.querySelector("[data-action-error]");
+      output.textContent = error.message;
+      output.hidden = false;
+    }
+  });
+
+  const giftForm = document.querySelector("#gift-form");
+  const updateGiftRecipient = () => {
+    if (!giftForm) return;
+    const recipientId = giftForm.elements.recipient.value;
+    const payerSelect = giftForm.elements.payer;
+    for (const option of payerSelect.options) option.disabled = option.value === recipientId;
+    if (payerSelect.value === recipientId) payerSelect.value = [...payerSelect.options].find((option) => !option.disabled)?.value ?? "";
+    giftForm.querySelectorAll("[name=giftContributor]").forEach((checkbox) => {
+      checkbox.disabled = checkbox.value === recipientId;
+      if (checkbox.disabled) checkbox.checked = false;
+    });
+  };
+  giftForm?.elements.recipient?.addEventListener("change", updateGiftRecipient);
+  updateGiftRecipient();
+  giftForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const data = new FormData(giftForm);
+      const recipientMemberId = String(data.get("recipient"));
+      const payerMemberId = String(data.get("payer"));
+      const memberIds = data.getAll("giftContributor");
+      const amountMinor = parseLedgerAmount(data.get("amount"));
+      if (!memberIds.length) throw new Error("Select at least one gift contributor.");
+      if (memberIds.includes(recipientMemberId) || payerMemberId === recipientMemberId) throw new Error("The recipient cannot pay for or contribute to their own surprise gift.");
+      const base = Math.floor(amountMinor / memberIds.length);
+      let remainder = amountMinor - base * memberIds.length;
+      const contributions = memberIds.map((memberId) => ({ memberId, cents: base + (remainder-- > 0 ? 1 : 0) }));
+      commitFromForm(giftForm, "SURPRISE_GIFT_RECORDED", { giftId: crypto.randomUUID(), recipientMemberId, payerMemberId, privateDescription: String(data.get("description")).trim(), amountMinor, contributions }, "Surprise gift recorded. Its recipient will see a confidential entry.");
+    } catch (error) {
+      const output = giftForm.querySelector("[data-action-error]");
       output.textContent = error.message;
       output.hidden = false;
     }
