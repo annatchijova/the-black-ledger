@@ -7,6 +7,12 @@ const api = (sessionId = "") => `/api/sessions${sessionId ? `/${encodeURICompone
 const updates = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("the-black-ledger-sync-v1");
 let appendWarnings = [];
 let accessContext = { role: "organizer", memberId: null };
+// Some state is not derivable from the event log and only the server holds it:
+// the reconciliation inbox is a table of provider captures, not events. Keeping
+// it beside the derived ledger rather than merged into it means the client's own
+// derivation stays a faithful function of the events, and a reader can still see
+// which values the server supplied.
+let serverState = null;
 const eventBaseCurrency = (events) => events.find((event) => event.type === "SESSION_CREATED")?.baseCurrency ?? "USD";
 
 async function request(path, options) {
@@ -29,6 +35,7 @@ export async function loadLedger() {
     try {
       const response = await request(api(sessionId));
       accessContext = response.access ?? { role: "organizer", memberId: null };
+      serverState = response.state ?? null;
       let events = parseEventLog(response.events, eventBaseCurrency(response.events));
       const oldRaw = invite ? null : localStorage.getItem(LEGACY_KEY);
       if (oldRaw !== null && accessContext.role === "organizer") {
@@ -80,6 +87,7 @@ function migrateEvents(event) {
 }
 
 export function getAccessContext() { return { ...accessContext }; }
+export function getServerState() { return serverState; }
 
 export async function appendEvent(currentEvents, type, fields) {
   const sessionId = localStorage.getItem(SESSION_KEY);
