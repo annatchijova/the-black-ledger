@@ -35,6 +35,16 @@ if (!db.prepare("PRAGMA table_info(paypal_order_requests)").all().some((column) 
   db.exec("ALTER TABLE paypal_order_requests ADD COLUMN provider_request_id TEXT");
 }
 
+// Preserve the provider's own amount claim verbatim alongside the parsed value.
+// A capture this ledger cannot interpret must still be recorded as evidence that
+// money moved, so it reaches the organizer instead of being discarded.
+for (const column of ["provider_amount_value TEXT", "provider_currency TEXT", "parse_error TEXT"]) {
+  const name = column.split(" ")[0];
+  if (!db.prepare("PRAGMA table_info(paypal_reconciliations)").all().some((existing) => existing.name === name)) {
+    db.exec(`ALTER TABLE paypal_reconciliations ADD COLUMN ${column}`);
+  }
+}
+
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml", ".json": "application/json" };
 const send = (res, status, body, headers = {}) => { res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers }); res.end(JSON.stringify(body)); };
 const sha = (value) => createHash("sha256").update(value).digest("hex");
@@ -121,11 +131,11 @@ function completeOrderRows(sessionId, orderId, captureId) {
   } catch (error) { db.exec("ROLLBACK"); throw error; }
 }
 
-function preserveCapturedPayment(sessionId, order, payment, amountMinor, currency, occurredAt) {
-  db.prepare(`INSERT INTO paypal_reconciliations(capture_id, order_id, session_id, from_member_id, to_member_id, amount_minor, currency, occurred_at, status, reason, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'Provider capture received; ledger posting has not completed.', ?)
-    ON CONFLICT(capture_id) DO UPDATE SET amount_minor = excluded.amount_minor, currency = excluded.currency, occurred_at = excluded.occurred_at`)
-    .run(payment.id, order.order_id, sessionId, order.from_member_id, order.to_member_id, amountMinor, currency, occurredAt, new Date().toISOString());
+function preserveCapturedPayment(sessionId, order, payment, amountMinor, currency, occurredAt, parseError = null) {
+  db.prepare(`INSERT INTO paypal_reconciliations(capture_id, order_id, session_id, from_member_id, to_member_id, amount_minor, currency, occurred_at, status, reason, created_at, provider_amount_value, provider_currency, parse_error)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'Provider capture received; ledger posting has not completed.', ?, ?, ?, ?)
+    ON CONFLICT(capture_id) DO UPDATE SET amount_minor = excluded.amount_minor, currency = excluded.currency, occurred_at = excluded.occurred_at, provider_amount_value = excluded.provider_amount_value, provider_currency = excluded.provider_currency, parse_error = excluded.parse_error`)
+    .run(payment.id, order.order_id, sessionId, order.from_member_id, order.to_member_id, amountMinor ?? 0, currency ?? "", occurredAt, new Date().toISOString(), payment.amount?.value ?? null, payment.amount?.currency_code ?? null, parseError);
 }
 
 function markReconciliationRequired(sessionId, orderId, captureId, reason) {
@@ -153,7 +163,7 @@ function publicState(ledger, access = {}) {
     discrepancies: ledger.discrepancies,
     balances: Object.fromEntries(ledger.balances),
     balanceBreakdowns: Object.fromEntries(ledger.balanceBreakdowns),
-    paymentReconciliations: access.role === "organizer" && ledger.session ? db.prepare("SELECT capture_id AS captureId, order_id AS orderId, from_member_id AS fromMemberId, to_member_id AS toMemberId, amount_minor AS amountMinor, currency, occurred_at AS occurredAt, status, reason FROM paypal_reconciliations WHERE session_id = ? AND status = 'pending' ORDER BY occurred_at").all(ledger.session.id) : [],
+    paymentReconciliations: access.role === "organizer" && ledger.session ? db.prepare("SELECT capture_id AS captureId, order_id AS orderId, from_member_id AS fromMemberId, to_member_id AS toMemberId, amount_minor AS amountMinor, currency, occurred_at AS occurredAt, status, reason, provider_amount_value AS providerAmountValue, provider_currency AS providerCurrency, parse_error AS parseError FROM paypal_reconciliations WHERE session_id = ? AND status = 'pending' ORDER BY occurred_at").all(ledger.session.id) : [],
     outstanding: ledger.outstanding,
     totalExpensesMinor: ledger.totalExpensesMinor,
     closure: ledger.closure,
@@ -490,9 +500,20 @@ async function route(req, res) {
       const reference = String(unit.reference_id ?? "").split(":");
       if (reference.length !== 3 || reference[0] !== sessionId || reference[1] !== storedOrder.from_member_id || reference[2] !== storedOrder.to_member_id) return send(res, 409, { error: "PayPal order does not match its stored ledger obligation." });
       const [, fromMemberId, toMemberId] = reference;
-      const capturedMinor = parseAmountToMinor(payment.amount?.value, payment.amount?.currency_code);
       const occurredAt = payment.create_time ?? capture.update_time ?? new Date().toISOString();
-      preserveCapturedPayment(sessionId, storedOrder, payment, capturedMinor, payment.amount?.currency_code, occurredAt);
+      // Interpret the amount only after the claim is persisted. parseAmountToMinor
+      // rejects currencies outside the supported table and excess precision, and a
+      // throw here would otherwise discard the only record that money moved.
+      let capturedMinor = null; let captureParseError = null;
+      try { capturedMinor = parseAmountToMinor(payment.amount?.value, payment.amount?.currency_code); }
+      catch (error) { captureParseError = error.message; }
+      preserveCapturedPayment(sessionId, storedOrder, payment, capturedMinor, payment.amount?.currency_code, occurredAt, captureParseError);
+      if (captureParseError) {
+        const reason = `Provider capture amount could not be interpreted: ${captureParseError}`;
+        console.warn(`[ledger] ${reason} order=${orderId} capture=${payment.id} value=${JSON.stringify(payment.amount?.value ?? null)} currency=${JSON.stringify(payment.amount?.currency_code ?? null)}`);
+        markReconciliationRequired(sessionId, orderId, payment.id, reason);
+        return send(res, 202, { status: "RECONCILIATION_REQUIRED", orderId, captureId: payment.id, providerAmount: payment.amount ?? null, parseError: captureParseError, message: "PayPal reports a completed capture whose amount this ledger cannot interpret. The financial event was not posted and requires organizer review." });
+      }
       const latest = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
       const recordedDuringCapture = latest.settlements.find((item) => item.settlementId === `paypal_${orderId}`);
       if (recordedDuringCapture?.confirmation?.confirmationSource === "provider_capture" && recordedDuringCapture.confirmation.providerCaptureId === payment.id) {
@@ -521,6 +542,7 @@ async function route(req, res) {
       if (!record) return send(res, 404, { error: "No pending reconciliation exists for this order." });
       const order = db.prepare("SELECT * FROM paypal_orders WHERE order_id = ? AND session_id = ?").get(orderId, sessionId);
       if (!order) return send(res, 404, { error: "The payment order no longer exists." });
+      if (record.parse_error) return send(res, 409, { error: "This capture's amount cannot be interpreted by the ledger, so it cannot be posted automatically. Settle it with the provider.", parseError: record.parse_error, providerAmount: { value: record.provider_amount_value, currency: record.provider_currency } });
       const latest = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
       const settlementId = `paypal_${orderId}`;
       const alreadyPosted = latest.settlements.find((item) => item.settlementId === settlementId && item.confirmation?.confirmationSource === "provider_capture" && item.confirmation.providerCaptureId === record.capture_id);
