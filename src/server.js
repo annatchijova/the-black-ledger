@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { canonicalStringify } from "./domain/canonical.js";
 import { deriveNarrativeEvents, narrativePattern } from "./domain/narrative.js";
 import { deriveLedger, parseEventLog, parseAmountToMinor, simulateLedger, findPossibleDuplicates } from "./domain.js";
-import { assertAnalysisAccess, reserveAnalysisCapacity } from "./analysis-access.js";
+import { assertAnalysisAccess, reserveAnalysisCapacity, releaseAnalysisCapacity } from "./analysis-access.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PAYPAL_APPROVAL_TTL_MS = 6 * 60 * 60 * 1000;
@@ -48,6 +48,18 @@ for (const column of ["provider_amount_value TEXT", "provider_currency TEXT", "p
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml", ".json": "application/json" };
 const send = (res, status, body, headers = {}) => { res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers }); res.end(JSON.stringify(body)); };
 const sha = (value) => createHash("sha256").update(value).digest("hex");
+
+// The attempt ceiling is keyed to the transport peer, not to a forwarded header,
+// because X-Forwarded-For is caller-supplied and would make the ceiling
+// self-defeating. Behind a reverse proxy every request shares the proxy's
+// address, so the ceiling degrades to a single shared allowance: terminate
+// closer to the client, or widen sourceLimit deliberately.
+const clientSource = (req) => req.socket?.remoteAddress ?? "unknown";
+
+// Overridable so the paid-analysis path can be exercised against a loopback
+// double. Without it the provider branch is unreachable in tests, which is how
+// a refund bug reaches production behind a green suite.
+const openAiBase = () => (process.env.OPENAI_BASE_URL ?? "https://api.openai.com").replace(/\/$/, "");
 
 function paypalConfig() {
   const clientId = process.env.PAYPAL_CLIENT_ID; const secret = process.env.PAYPAL_CLIENT_SECRET;
@@ -287,9 +299,11 @@ async function route(req, res) {
       const image = Buffer.from(body.dataBase64, "base64");
       if (!image.length || image.length > 8_000_000 || image.toString("base64").replace(/=+$/, "") !== body.dataBase64.replace(/=+$/, "")) return send(res, 400, { error: "Receipt image encoding is invalid or exceeds the 8 MB limit." });
       const schema = { type: "object", additionalProperties: false, required: ["merchant", "date", "currency", "total", "items", "uncertainties"], properties: { merchant: { type: ["string", "null"] }, date: { type: ["string", "null"] }, currency: { type: ["string", "null"] }, total: { type: ["string", "null"] }, items: { type: "array", items: { type: "object", additionalProperties: false, required: ["description", "quantity", "amount", "confidence"], properties: { description: { type: "string" }, quantity: { type: ["string", "null"] }, amount: { type: ["string", "null"] }, confidence: { type: "number" } } } }, uncertainties: { type: "array", items: { type: "string" } } } };
-      reserveAnalysisCapacity(db, { sessionId, principalId: access.member_id ?? access.role });
-      const aiResponse = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: process.env.OPENAI_RECEIPT_MODEL ?? "gpt-4.1-mini", store: false, input: [{ role: "user", content: [{ type: "input_text", text: "Extract only facts visible on this receipt. Preserve decimal strings exactly. Do not infer missing values. Mark ambiguity in uncertainties. This is a proposal for human review and will not be recorded automatically." }, { type: "input_image", image_url: `data:${mediaType};base64,${body.dataBase64}` }] }], text: { format: { type: "json_schema", name: "receipt_proposal", strict: true, schema } } }), signal: AbortSignal.timeout(40_000) });
-      if (!aiResponse.ok) return send(res, 502, { error: "Receipt analysis provider returned an error." });
+      const reservation = reserveAnalysisCapacity(db, { sessionId, principalId: access.member_id ?? access.role, sourceId: clientSource(req) });
+      let aiResponse;
+      try { aiResponse = await fetch(`${openAiBase()}/v1/responses`, { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: process.env.OPENAI_RECEIPT_MODEL ?? "gpt-4.1-mini", store: false, input: [{ role: "user", content: [{ type: "input_text", text: "Extract only facts visible on this receipt. Preserve decimal strings exactly. Do not infer missing values. Mark ambiguity in uncertainties. This is a proposal for human review and will not be recorded automatically." }, { type: "input_image", image_url: `data:${mediaType};base64,${body.dataBase64}` }] }], text: { format: { type: "json_schema", name: "receipt_proposal", strict: true, schema } } }), signal: AbortSignal.timeout(40_000) }); }
+      catch (error) { releaseAnalysisCapacity(db, reservation); throw error; }
+      if (!aiResponse.ok) { releaseAnalysisCapacity(db, reservation); return send(res, 502, { error: "Receipt analysis provider returned an error." }); }
       const result = await aiResponse.json();
       const outputText = result.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text")?.text;
       if (!outputText) return send(res, 502, { error: "Receipt analysis returned no structured proposal." });
@@ -307,9 +321,11 @@ async function route(req, res) {
       const ledger = deriveLedger(currentEvents, { baseCurrency: session.base_currency });
       const schema = { type: "object", additionalProperties: false, required: ["expenses", "uncertainties"], properties: { expenses: { type: "array", maxItems: 5, items: { type: "object", additionalProperties: false, required: ["description", "payerId", "amount", "allocations"], properties: { description: { type: "string" }, payerId: { type: "string" }, amount: { type: "string" }, allocations: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false, required: ["memberId", "amount"], properties: { memberId: { type: "string" }, amount: { type: "string" } } } } } } }, uncertainties: { type: "array", maxItems: 20, items: { type: "string" } } } };
       const promptContext = { request: prompt, baseCurrency: session.base_currency, participants: ledger.members.map((member) => ({ id: member.id, name: member.name })), currentBalancesMinor: Object.fromEntries(ledger.balances) };
-      reserveAnalysisCapacity(db, { sessionId, principalId: access.member_id ?? access.role });
-      const aiResponse = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: process.env.OPENAI_RECEIPT_MODEL ?? "gpt-4.1-mini", store: false, max_output_tokens: 3000, input: [{ role: "user", content: [{ type: "input_text", text: `Translate the user's hypothetical into at most five proposed shared expenses. Use only participant IDs provided. Express amounts as ordinary decimal strings in ${session.base_currency}; do not calculate balances or infer missing facts. Return uncertainties when a payer, beneficiary, amount, or split is unclear. These records are simulation-only and must never be saved. Context: ${JSON.stringify(promptContext)}` }] }], text: { format: { type: "json_schema", name: "scenario_proposal", strict: true, schema } } }), signal: AbortSignal.timeout(40_000) });
-      if (!aiResponse.ok) return send(res, 502, { error: "Scenario analysis provider returned an error." });
+      const reservation = reserveAnalysisCapacity(db, { sessionId, principalId: access.member_id ?? access.role, sourceId: clientSource(req) });
+      let aiResponse;
+      try { aiResponse = await fetch(`${openAiBase()}/v1/responses`, { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: process.env.OPENAI_RECEIPT_MODEL ?? "gpt-4.1-mini", store: false, max_output_tokens: 3000, input: [{ role: "user", content: [{ type: "input_text", text: `Translate the user's hypothetical into at most five proposed shared expenses. Use only participant IDs provided. Express amounts as ordinary decimal strings in ${session.base_currency}; do not calculate balances or infer missing facts. Return uncertainties when a payer, beneficiary, amount, or split is unclear. These records are simulation-only and must never be saved. Context: ${JSON.stringify(promptContext)}` }] }], text: { format: { type: "json_schema", name: "scenario_proposal", strict: true, schema } } }), signal: AbortSignal.timeout(40_000) }); }
+      catch (error) { releaseAnalysisCapacity(db, reservation); throw error; }
+      if (!aiResponse.ok) { releaseAnalysisCapacity(db, reservation); return send(res, 502, { error: "Scenario analysis provider returned an error." }); }
       const aiResult = await aiResponse.json();
       const outputText = aiResult.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text")?.text;
       if (!outputText) return send(res, 502, { error: "Scenario analysis returned no structured proposal." });
