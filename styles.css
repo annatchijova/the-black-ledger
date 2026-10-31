@@ -1188,3 +1188,11 @@ background:#171411}
 #receipt-note{
 flex:1 1 220px;
 min-width:0}
+#receipt-proposal{
+white-space:pre-wrap;
+overflow-wrap:anywhere;
+max-width:100%;
+margin:10px 0 0;
+color:#b8aa92;
+font-size:13px;
+line-height:1.55}

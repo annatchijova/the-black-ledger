@@ -374,11 +374,19 @@ function bindPage(current) {
 
   document.querySelector("#analyze-receipt")?.addEventListener("click", async () => {
     const file = document.querySelector("#receipt-image")?.files?.[0];
-    const output = document.querySelector("#receipt-proposal");
+    // Re-queried on every write: attaching the photo re-renders this panel, so a
+    // reference captured beforehand writes into a detached node and the reader's
+    // outcome never reaches the screen.
+    const output = (text) => {
+      const element = document.querySelector("#receipt-proposal");
+      if (!element) return;
+      element.hidden = false;
+      element.textContent = text;
+    };
     try {
       if (!file || file.size > 8_000_000) throw new Error("Choose an image no larger than 8 MB.");
       if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(file.type)) throw new Error("Choose a JPEG, PNG, or WebP image.");
-      output.hidden = false; output.textContent = "Attaching photo…";
+      output("Attaching photo…");
       const bytes = new Uint8Array(await file.arrayBuffer());
       let binary = "";
       for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
@@ -397,7 +405,7 @@ function bindPage(current) {
       if (!pendingEvidenceIds.includes(evidence.id)) pendingEvidenceIds.push(evidence.id);
       render();
 
-      output.textContent = "Photo attached. Reading it\u2026";
+      output("Photo attached. Reading it\u2026");
       let proposal = null; let readerMessage = "";
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/analysis/receipt`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ mediaType: file.type, dataBase64 }) });
@@ -407,11 +415,11 @@ function bindPage(current) {
       } catch { readerMessage = "the reader could not be reached"; }
 
       if (!proposal) {
-        output.textContent = `Photo attached and recorded in the history.\n\nIt was not read automatically (${readerMessage}), so type the description and amount yourself. Leave the amount empty if this is only a reference.`;
+        output(`Photo attached and recorded in the history.\n\nIt was not read automatically (${readerMessage}), so type the description and amount yourself. Leave the amount empty if this is only a reference.`);
         showToast("Photo attached. Enter the details by hand.");
         return;
       }
-      output.textContent = JSON.stringify(proposal, null, 2);
+      output(JSON.stringify(proposal, null, 2));
       const form = document.querySelector("#expense-form");
       const proposalCurrency = String(proposal.currency ?? "").toUpperCase();
       if (form && proposalCurrency && SUPPORTED_CURRENCIES.includes(proposalCurrency)) {
@@ -421,7 +429,7 @@ function bindPage(current) {
       if (form && proposal.merchant) form.elements.description.value = proposal.merchant;
       if (form && proposal.total) form.elements.amount.value = proposal.total;
       showToast("Photo attached and a proposal is ready. Review each value before recording.");
-    } catch (error) { if (output) { output.hidden = false; output.textContent = error.message; } }
+    } catch (error) { output(error.message); }
   });
 
   document.querySelector("#member-form")?.addEventListener("submit", (event) => {
