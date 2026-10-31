@@ -108,7 +108,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
         const replacement = normalizeExpense({ ...event.replacement, id: event.expenseId, at: event.at, type: "EXPENSE_RECORDED" }, baseCurrency);
         if (!members.has(replacement.payerId) || replacement.allocations.some((row) => !members.has(row.memberId)) || replacement.groupIds.some((groupId) => !groups.has(groupId))) throw new Error("A corrected expense must refer to existing participants and groups.");
         if (replacement.evidenceIds.some((evidenceId) => !evidence.has(evidenceId))) throw new Error("A corrected expense refers to unattached evidence.");
-        expenses.set(replacement.id, { ...replacement, eventId: event.id, correctionReason: event.reason }); break;
+        expenses.set(replacement.id, { ...replacement, sourceEventId: event.id, eventId: event.id, correctionReason: event.reason }); break;
       }
       case "MEMBER_CONFIRMED_EXPENSE": {
         const expense = expenses.get(event.expenseId);
@@ -221,7 +221,20 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
 
   // Recompute direct balances from confirmed records; open claims and pending payments never move money.
   const balances = new Map([...members.keys()].map((id) => [id, 0]));
+  const refundsBySettlement = new Map();
+  for (const event of events) if (event.type === "SETTLEMENT_REFUNDED") {
+    const rows = refundsBySettlement.get(event.settlementId) ?? [];
+    rows.push(event); refundsBySettlement.set(event.settlementId, rows);
+  }
   const pairObligations = new Map();
+  const balanceBreakdowns = new Map([...members.keys()].map((id) => [id, []]));
+  const post = (debtorId, creditorId, amountMinor, kind, recordId, eventIds) => {
+    add(pairObligations, keyOf(debtorId, creditorId), amountMinor);
+    if (debtorId === creditorId || amountMinor === 0) return;
+    const references = [...new Set(eventIds.filter(Boolean))];
+    balanceBreakdowns.get(debtorId).push({ kind, recordId, eventIds: references, counterpartyId: creditorId, deltaMinor: -amountMinor });
+    balanceBreakdowns.get(creditorId).push({ kind, recordId, eventIds: references, counterpartyId: debtorId, deltaMinor: amountMinor });
+  };
   for (const expense of expenses.values()) {
     if (superseded.has(expense.sourceEventId) || expense.status === "unassigned") continue;
     if (!members.has(expense.payerId)) throw new Error("An expense refers to an unknown payer.");
@@ -233,26 +246,30 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
       const row = expense.allocations[index];
       const feeShare = feeShares[index].baseMinor;
       const purchaseShare = row.baseMinor - feeShare;
-      if (row.memberId !== expense.payerId && purchaseShare > 0) add(pairObligations, keyOf(row.memberId, expense.payerId), purchaseShare);
-      if (row.memberId !== feePayerId && feeShare > 0) add(pairObligations, keyOf(row.memberId, feePayerId), feeShare);
+      if (row.memberId !== expense.payerId && purchaseShare > 0) post(row.memberId, expense.payerId, purchaseShare, "expense", expense.id, [expense.sourceEventId]);
+      if (row.memberId !== feePayerId && feeShare > 0) post(row.memberId, feePayerId, feeShare, "conversion_fee", expense.id, [expense.sourceEventId]);
     }
   }
-  for (const item of carried) add(pairObligations, keyOf(item.debtorId, item.creditorId), item.amountMinor);
-  for (const item of carriedOut) add(pairObligations, keyOf(item.debtorId, item.creditorId), -item.amountMinor);
-  for (const [key, amount] of forgiven) add(pairObligations, key, -amount);
+  for (const item of carried) post(item.debtorId, item.creditorId, item.amountMinor, "carried_in", item.originObligationId, [item.id]);
+  for (const item of carriedOut) post(item.debtorId, item.creditorId, -item.amountMinor, "carried_out", item.transferId, [item.id]);
+  for (const event of events.filter((item) => item.type === "OBLIGATION_FORGIVEN")) post(event.debtorId, event.creditorId, -event.amountMinor, "forgiveness", event.id, [event.id]);
   for (const event of assumed) {
     const oldKey = keyOf(event.fromMemberId, event.creditorMemberId);
     const old = pairObligations.get(oldKey) ?? 0;
     if (old < event.amountMinor) throw new Error("Assumed responsibility exceeds the outstanding obligation.");
-    add(pairObligations, oldKey, -event.amountMinor);
-    add(pairObligations, keyOf(event.toMemberId, event.creditorMemberId), event.amountMinor);
+    post(event.fromMemberId, event.creditorMemberId, -event.amountMinor, "responsibility_released", event.id, [event.id]);
+    post(event.toMemberId, event.creditorMemberId, event.amountMinor, "responsibility_assumed", event.id, [event.id]);
   }
   for (const payment of settlements.values()) {
     if (payment.status !== "completed" && payment.status !== "refunded") continue;
     const fromId = payment.fromMemberId ?? payment.fromId; const toId = payment.toMemberId ?? payment.toId;
     const amount = payment.amountMinor ?? payment.cents;
     if (!members.has(fromId) || !members.has(toId)) throw new Error("A payment refers to an unknown participant.");
-    add(pairObligations, keyOf(fromId, toId), -(amount - (payment.refundedMinor ?? 0)));
+    const paymentId = payment.settlementId ?? payment.id;
+    post(fromId, toId, -amount, "payment", paymentId, [payment.id, payment.confirmation?.id]);
+    for (const refund of refundsBySettlement.get(paymentId) ?? []) {
+      post(fromId, toId, refund.amountMinor, "payment_refund", paymentId, [payment.id, payment.confirmation?.id, refund.id]);
+    }
   }
   const pendingClaims = new Map();
   for (const payment of settlements.values()) {
@@ -281,7 +298,7 @@ export function deriveLedger(rawEvents, { baseCurrency = "USD" } = {}) {
     events, eventById, session, members: [...members.values()], groups: [...groups.values()], expenses: [...expenses.values()].map((expense) => ({ ...expense, totalCents: expense.baseAmountMinor })),
     settlements: [...settlements.values()].map((payment) => ({ ...payment, fromId: payment.fromMemberId ?? payment.fromId, toId: payment.toMemberId ?? payment.toId, cents: payment.amountMinor ?? payment.cents })), commitments: [...commitments.values()], carriedObligations: carried, carriedOut, discrepancies: [...discrepancies.values()],
     confirmations: [...confirmations.values()], evidence: [...evidence.values()], gifts: [...gifts.values()], budgets,
-    recurringRules: [...recurringRules.values()], recurringPeriods: [...recurringPeriods], rules, balances, outstanding,
+    recurringRules: [...recurringRules.values()], recurringPeriods: [...recurringPeriods], rules, balances, balanceBreakdowns, outstanding,
     pendingClaims: [...pendingClaims].map(([pair, amountMinor]) => { const [fromMemberId, toMemberId] = pair.split("\0"); return { fromMemberId, toMemberId, amountMinor }; }),
     archived, closure, closureBlockers: blockers,
     totalExpensesMinor: sumMinor([...expenses.values()].filter((e) => !superseded.has(e.sourceEventId) && e.status !== "unassigned").map((e) => e.baseAmountMinor)),

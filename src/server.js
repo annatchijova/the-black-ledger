@@ -1,5 +1,5 @@
 import http from "node:http";
-import { createReadStream, existsSync, mkdirSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,10 +23,17 @@ CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, session_id TEXT NOT NU
 CREATE TABLE IF NOT EXISTS session_tokens (token_hash TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), role TEXT NOT NULL, member_id TEXT, created_at TEXT NOT NULL, revoked_at TEXT);
 CREATE TABLE IF NOT EXISTS paypal_orders (order_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, status TEXT NOT NULL, capture_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS paypal_order_requests (session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, status TEXT NOT NULL, order_id TEXT, approval_url TEXT, created_at TEXT NOT NULL, PRIMARY KEY(session_id, request_id));
+CREATE TABLE IF NOT EXISTS paypal_reconciliations (capture_id TEXT PRIMARY KEY, order_id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL REFERENCES sessions(id), from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, occurred_at TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL, resolved_at TEXT);
 CREATE TABLE IF NOT EXISTS session_patterns (session_id TEXT PRIMARY KEY REFERENCES sessions(id), pattern TEXT NOT NULL, recorded_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS analysis_usage (scope_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, request_count INTEGER NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS evidence_session_digest ON evidence(session_id, sha256);
 `);
+
+// Persist the provider key so retries survive upgrades without creating a
+// second external order. Existing rows retain the legacy key on first retry.
+if (!db.prepare("PRAGMA table_info(paypal_order_requests)").all().some((column) => column.name === "provider_request_id")) {
+  db.exec("ALTER TABLE paypal_order_requests ADD COLUMN provider_request_id TEXT");
+}
 
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml", ".json": "application/json" };
 const send = (res, status, body, headers = {}) => { res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers }); res.end(JSON.stringify(body)); };
@@ -104,6 +111,33 @@ function append(sessionId, event, requestId, { trustedProvider = false } = {}) {
   return response;
 }
 
+function completeOrderRows(sessionId, orderId, captureId) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE paypal_orders SET status = 'completed', capture_id = ? WHERE order_id = ? AND session_id = ?").run(captureId, orderId, sessionId);
+    db.prepare("UPDATE paypal_order_requests SET status = 'completed' WHERE order_id = ? AND session_id = ?").run(orderId, sessionId);
+    db.prepare("UPDATE paypal_reconciliations SET status = 'resolved', resolved_at = ?, reason = NULL WHERE capture_id = ? AND session_id = ?").run(new Date().toISOString(), captureId, sessionId);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+}
+
+function preserveCapturedPayment(sessionId, order, payment, amountMinor, currency, occurredAt) {
+  db.prepare(`INSERT INTO paypal_reconciliations(capture_id, order_id, session_id, from_member_id, to_member_id, amount_minor, currency, occurred_at, status, reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'Provider capture received; ledger posting has not completed.', ?)
+    ON CONFLICT(capture_id) DO UPDATE SET amount_minor = excluded.amount_minor, currency = excluded.currency, occurred_at = excluded.occurred_at`)
+    .run(payment.id, order.order_id, sessionId, order.from_member_id, order.to_member_id, amountMinor, currency, occurredAt, new Date().toISOString());
+}
+
+function markReconciliationRequired(sessionId, orderId, captureId, reason) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE paypal_reconciliations SET status = 'pending', reason = ? WHERE capture_id = ? AND session_id = ?").run(reason, captureId, sessionId);
+    db.prepare("UPDATE paypal_orders SET status = 'reconciliation_required', capture_id = ? WHERE order_id = ? AND session_id = ?").run(captureId, orderId, sessionId);
+    db.prepare("UPDATE paypal_order_requests SET status = 'reconciliation_required' WHERE order_id = ? AND session_id = ?").run(orderId, sessionId);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+}
+
 function publicState(ledger, access = {}) {
   const expenses = ledger.expenses.map((expense) => {
     const gift = expense.giftId ? ledger.gifts.find((item) => item.giftId === expense.giftId) : null;
@@ -118,6 +152,8 @@ function publicState(ledger, access = {}) {
     commitments: ledger.commitments,
     discrepancies: ledger.discrepancies,
     balances: Object.fromEntries(ledger.balances),
+    balanceBreakdowns: Object.fromEntries(ledger.balanceBreakdowns),
+    paymentReconciliations: access.role === "organizer" && ledger.session ? db.prepare("SELECT capture_id AS captureId, order_id AS orderId, from_member_id AS fromMemberId, to_member_id AS toMemberId, amount_minor AS amountMinor, currency, occurred_at AS occurredAt, status, reason FROM paypal_reconciliations WHERE session_id = ? AND status = 'pending' ORDER BY occurred_at").all(ledger.session.id) : [],
     outstanding: ledger.outstanding,
     totalExpensesMinor: ledger.totalExpensesMinor,
     closure: ledger.closure,
@@ -142,7 +178,7 @@ async function route(req, res) {
     const response = append(sessionId, createEvent, `create:${sessionId}`);
     return send(res, 201, { sessionId, accessToken, ...response });
   }
-  const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,100})(?:\/(events|evidence|export|analysis\/(?:receipt|scenario)|simulate|invitations|carry-debt|payments(?:\/[A-Z0-9-]+\/(?:capture|cancel))?))?$/.exec(url.pathname);
+  const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,100})(?:\/(events|evidence|export|analysis\/(?:receipt|scenario)|simulate|invitations|carry-debt|payments(?:\/[A-Z0-9-]+\/(?:capture|cancel|reconcile))?))?$/.exec(url.pathname);
   if (match) {
     const [, sessionId, resource] = match;
     const session = db.prepare("SELECT id, base_currency FROM sessions WHERE id = ?").get(sessionId);
@@ -282,9 +318,9 @@ async function route(req, res) {
       if (organizerOnly.has(event?.type) && access.role !== "organizer") return send(res, 403, { error: "This ledger action is restricted to its organizer." });
       const actor = access.member_id;
       if (actor && before.members.find((member) => member.id === actor)?.status !== "active") return send(res, 403, { error: "Departed or removed participants cannot change this ledger." });
-      if (actor && event?.type === "EXPENSE_RECORDED" && event.recurringRuleId) return send(res, 403, { error: "Only the organizer can generate an expense from an approved recurring rule." });
-      if (actor && event?.type === "EXPENSE_RECORDED" && (event.paidByMemberId ?? event.payerId) !== actor) return send(res, 403, { error: "A participant can only enter an expense they paid." });
-      if (actor && event?.type === "EXPENSE_RECORDED") {
+      if (actor && ["EXPENSE_RECORDED", "EXPENSE_UNASSIGNED"].includes(event?.type) && event.recurringRuleId) return send(res, 403, { error: "Only the organizer can generate an expense from an approved recurring rule." });
+      if (actor && ["EXPENSE_RECORDED", "EXPENSE_UNASSIGNED"].includes(event?.type) && (event.paidByMemberId ?? event.payerId) !== actor) return send(res, 403, { error: "A participant can only enter an expense they paid." });
+      if (actor && ["EXPENSE_RECORDED", "EXPENSE_UNASSIGNED"].includes(event?.type)) {
         const commitment = before.commitments.find((item) => item.commitmentId === event.commitmentId);
         const priorCommitmentMembers = new Set(commitment?.allocations.map((row) => row.memberId) ?? []);
         if ((event.allocations ?? []).some((row) => before.members.find((member) => member.id === row.memberId)?.status !== "active" && !priorCommitmentMembers.has(row.memberId))) return send(res, 403, { error: "A participant cannot assign a new expense to someone who has departed." });
@@ -313,7 +349,13 @@ async function route(req, res) {
         const current = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
         result.possibleDuplicates = findPossibleDuplicates(before.expenses, current.expenses.find((expense) => expense.sourceEventId === event.id) ?? event);
       }
-      return send(res, 201, result);
+      // Project cached write responses as well as new ones for the caller.
+      // Idempotency snapshots are stored without a caller-specific view.
+      const state = { ...result.state, expenses: result.state.expenses.map((expense) => {
+        const gift = before.gifts.find((item) => item.giftId === expense.giftId);
+        return gift && access.member_id === gift.recipientMemberId ? { ...expense, description: "Confidential surprise gift" } : expense;
+      }) };
+      return send(res, 201, { ...result, state });
     }
     if (req.method === "POST" && resource === "simulate") {
       const body = await readJson(req, 1_000_000);
@@ -368,6 +410,7 @@ async function route(req, res) {
       if (session.base_currency !== "USD") return send(res, 422, { error: "PayPal Checkout currently requires a USD ledger session." });
       const config = paypalConfig();
       if (body.toMemberId !== config.payeeMemberId) return send(res, 422, { error: "PayPal Checkout can currently settle only obligations owed to the configured merchant participant." });
+      const providerRequestId = previous?.provider_request_id ?? (previous ? `bl_${sha(requestId).slice(0, 32)}` : `bl_${sha(canonicalStringify([sessionId, requestId])).slice(0, 32)}`);
       const sessionSnapshot = db.prepare("SELECT event_count, head_hash FROM sessions WHERE id = ?").get(sessionId);
       db.exec("BEGIN IMMEDIATE");
       try {
@@ -377,13 +420,12 @@ async function route(req, res) {
         const reserved = reservations.filter((row) => row.request_id !== requestId && Date.now() - Date.parse(row.created_at) < PAYPAL_APPROVAL_TTL_MS && (row.status === "creating" || !ledger.settlements.some((payment) => payment.settlementId === `paypal_${row.order_id}`))).reduce((total, row) => total + row.amount_minor, 0);
         const available = due - claimed - reserved;
         if (amount > available) throw Object.assign(new Error("Another checkout already reserves part of this obligation."), { status: 409 });
-        if (previous) db.prepare("UPDATE paypal_order_requests SET amount_minor = ?, status = 'creating', created_at = ? WHERE session_id = ? AND request_id = ?").run(amount, new Date().toISOString(), sessionId, requestId);
-        else db.prepare("INSERT INTO paypal_order_requests(session_id, request_id, fingerprint, from_member_id, to_member_id, amount_minor, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'creating', ?)").run(sessionId, requestId, fingerprint, body.fromMemberId, body.toMemberId, amount, new Date().toISOString());
+        if (previous) db.prepare("UPDATE paypal_order_requests SET amount_minor = ?, status = 'creating', created_at = ?, provider_request_id = ? WHERE session_id = ? AND request_id = ?").run(amount, new Date().toISOString(), providerRequestId, sessionId, requestId);
+        else db.prepare("INSERT INTO paypal_order_requests(session_id, request_id, fingerprint, from_member_id, to_member_id, amount_minor, status, created_at, provider_request_id) VALUES (?, ?, ?, ?, ?, ?, 'creating', ?, ?)").run(sessionId, requestId, fingerprint, body.fromMemberId, body.toMemberId, amount, new Date().toISOString(), providerRequestId);
         db.exec("COMMIT");
       } catch (error) { db.exec("ROLLBACK"); throw error; }
       const appBase = (process.env.APP_BASE_URL ?? "http://127.0.0.1:4173").replace(/\/$/, "");
       try {
-        const providerRequestId = `bl_${sha(requestId).slice(0, 32)}`;
         const order = await paypalRequest("/v2/checkout/orders", { method: "POST", headers: { "PayPal-Request-Id": providerRequestId }, body: JSON.stringify({ intent: "CAPTURE", purchase_units: [{ reference_id: `${sessionId}:${body.fromMemberId}:${body.toMemberId}`, description: "Shared expense settlement", amount: { currency_code: "USD", value: `${Math.floor(amount / 100)}.${String(amount % 100).padStart(2, "0")}` }, ...(config.payee ? { payee: { merchant_id: config.payee } } : {}) }], payment_source: { paypal: { experience_context: { return_url: `${appBase}/?payment=return`, cancel_url: `${appBase}/?payment=cancel`, shipping_preference: "NO_SHIPPING", user_action: "PAY_NOW" } } } }) });
         if (!order.id) throw Object.assign(new Error("PayPal did not return an order ID."), { status: 502 });
         const approvalUrl = order.links?.find((link) => link.rel === "approve" || link.rel === "payer-action")?.href;
@@ -427,6 +469,12 @@ async function route(req, res) {
       if (access.role === "member" && access.member_id !== storedOrder.from_member_id) return send(res, 403, { error: "A participant can only capture their own PayPal order." });
       if (storedOrder.status === "completed" && storedOrder.capture_id) return send(res, 200, { status: "COMPLETED", orderId, captureId: storedOrder.capture_id, alreadyRecorded: true });
       if (storedOrder.status !== "created") return send(res, 409, { error: `This PayPal order is ${storedOrder.status} and cannot be captured.` });
+      const recorded = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency }).settlements.find((item) => item.settlementId === `paypal_${orderId}`);
+      if (recorded?.confirmation?.confirmationSource === "provider_capture" && recorded.confirmation.provider === "paypal" && recorded.confirmation.providerCaptureId) {
+        const captureId = recorded.confirmation.providerCaptureId;
+        completeOrderRows(sessionId, orderId, captureId);
+        return send(res, 200, { status: "COMPLETED", orderId, captureId, alreadyRecorded: true });
+      }
       const capture = await paypalRequest(`/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, { method: "POST", headers: { "PayPal-Request-Id": `ledger-capture-${orderId}` }, body: "{}" });
       const unit = capture.purchase_units?.[0]; const payment = unit?.payments?.captures?.[0];
       if (capture.status !== "COMPLETED" || payment?.status !== "COMPLETED") {
@@ -443,21 +491,62 @@ async function route(req, res) {
       if (reference.length !== 3 || reference[0] !== sessionId || reference[1] !== storedOrder.from_member_id || reference[2] !== storedOrder.to_member_id) return send(res, 409, { error: "PayPal order does not match its stored ledger obligation." });
       const [, fromMemberId, toMemberId] = reference;
       const capturedMinor = parseAmountToMinor(payment.amount?.value, payment.amount?.currency_code);
+      const occurredAt = payment.create_time ?? capture.update_time ?? new Date().toISOString();
+      preserveCapturedPayment(sessionId, storedOrder, payment, capturedMinor, payment.amount?.currency_code, occurredAt);
       const latest = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
+      const recordedDuringCapture = latest.settlements.find((item) => item.settlementId === `paypal_${orderId}`);
+      if (recordedDuringCapture?.confirmation?.confirmationSource === "provider_capture" && recordedDuringCapture.confirmation.providerCaptureId === payment.id) {
+        completeOrderRows(sessionId, orderId, payment.id);
+        return send(res, 200, { status: "COMPLETED", orderId, captureId: payment.id, alreadyRecorded: true });
+      }
       const due = latest.outstanding.find((item) => item.debtorId === fromMemberId && item.creditorId === toMemberId)?.amountMinor ?? 0;
       const orderSettlementId = `paypal_${orderId}`;
       const orderClaim = latest.settlements.find((item) => item.settlementId === orderSettlementId && item.status === "pending");
       const claimed = latest.pendingClaims.find((item) => item.fromMemberId === fromMemberId && item.toMemberId === toMemberId)?.amountMinor ?? 0;
       const otherClaims = claimed - (orderClaim?.amountMinor ?? 0);
-      if (!orderClaim || capturedMinor !== storedOrder.amount_minor || capturedMinor !== orderClaim.amountMinor || capturedMinor > due - otherClaims || payment.amount?.currency_code !== session.base_currency) return send(res, 409, { error: "Captured amount no longer fits the outstanding ledger obligation; manual reconciliation is required.", capturedMinor, availableMinor: due - otherClaims });
-      const occurredAt = payment.create_time ?? capture.update_time ?? new Date().toISOString();
+      if (!orderClaim || capturedMinor !== storedOrder.amount_minor || capturedMinor !== orderClaim.amountMinor || capturedMinor > due - otherClaims || payment.amount?.currency_code !== session.base_currency) {
+        const reason = "Captured amount or currency does not match the current outstanding ledger obligation.";
+        markReconciliationRequired(sessionId, orderId, payment.id, reason);
+        return send(res, 202, { status: "RECONCILIATION_REQUIRED", orderId, captureId: payment.id, capturedMinor, currency: payment.amount?.currency_code, availableMinor: due - otherClaims, message: "PayPal reports a completed capture. The financial event was not posted and requires organizer review." });
+      }
       const confirmation = { id: `paypal_${payment.id}_confirmed`, at: occurredAt, type: "SETTLEMENT_CONFIRMED", settlementId: orderSettlementId, confirmedByMemberId: toMemberId, confirmationSource: "provider_capture", provider: "paypal", providerCaptureId: payment.id, providerStatus: "COMPLETED" };
       const confirmed = append(sessionId, confirmation, `paypal-capture-${payment.id}-confirmed`, { trustedProvider: true });
-      db.prepare("UPDATE paypal_orders SET status = 'completed', capture_id = ? WHERE order_id = ? AND session_id = ?").run(payment.id, orderId, sessionId);
-      db.prepare("UPDATE paypal_order_requests SET status = 'completed' WHERE order_id = ? AND session_id = ?").run(orderId, sessionId);
+      completeOrderRows(sessionId, orderId, payment.id);
       return send(res, 200, { status: "COMPLETED", orderId, captureId: payment.id, event: confirmed.event, headHash: confirmed.headHash });
     }
+    if (req.method === "POST" && /^payments\/[^/]+\/reconcile$/.test(resource ?? "")) {
+      if (access.role !== "organizer") return send(res, 403, { error: "Only the organizer can reconcile a captured payment." });
+      const orderId = resource.split("/")[1];
+      const record = db.prepare("SELECT * FROM paypal_reconciliations WHERE order_id = ? AND session_id = ? AND status = 'pending'").get(orderId, sessionId);
+      if (!record) return send(res, 404, { error: "No pending reconciliation exists for this order." });
+      const order = db.prepare("SELECT * FROM paypal_orders WHERE order_id = ? AND session_id = ?").get(orderId, sessionId);
+      if (!order) return send(res, 404, { error: "The payment order no longer exists." });
+      const latest = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
+      const settlementId = `paypal_${orderId}`;
+      const alreadyPosted = latest.settlements.find((item) => item.settlementId === settlementId && item.confirmation?.confirmationSource === "provider_capture" && item.confirmation.providerCaptureId === record.capture_id);
+      if (alreadyPosted) {
+        completeOrderRows(sessionId, orderId, record.capture_id);
+        return send(res, 200, { status: "COMPLETED", orderId, captureId: record.capture_id, alreadyRecorded: true, reconciled: true });
+      }
+      const claim = latest.settlements.find((item) => item.settlementId === settlementId && item.status === "pending");
+      const due = latest.outstanding.find((item) => item.debtorId === record.from_member_id && item.creditorId === record.to_member_id)?.amountMinor ?? 0;
+      const claimed = latest.pendingClaims.find((item) => item.fromMemberId === record.from_member_id && item.toMemberId === record.to_member_id)?.amountMinor ?? 0;
+      const otherClaims = claimed - (claim?.amountMinor ?? 0);
+      if (!claim || record.amount_minor !== order.amount_minor || record.amount_minor !== claim.amountMinor || record.amount_minor > due - otherClaims || record.currency !== session.base_currency) {
+        const reason = "Captured amount or currency still does not match the current outstanding ledger obligation.";
+        db.prepare("UPDATE paypal_reconciliations SET reason = ? WHERE capture_id = ?").run(reason, record.capture_id);
+        return send(res, 409, { error: reason, capturedMinor: record.amount_minor, currency: record.currency, availableMinor: due - otherClaims });
+      }
+      const confirmation = { id: `paypal_${record.capture_id}_confirmed`, at: record.occurred_at, type: "SETTLEMENT_CONFIRMED", settlementId, confirmedByMemberId: record.to_member_id, confirmationSource: "provider_capture", provider: "paypal", providerCaptureId: record.capture_id, providerStatus: "COMPLETED" };
+      const confirmed = append(sessionId, confirmation, `paypal-capture-${record.capture_id}-confirmed`, { trustedProvider: true });
+      completeOrderRows(sessionId, orderId, record.capture_id);
+      return send(res, 200, { status: "COMPLETED", orderId, captureId: record.capture_id, event: confirmed.event, headHash: confirmed.headHash, reconciled: true });
+    }
     if (req.method === "POST" && resource === "evidence") {
+      if (access.role === "member") {
+        const ledger = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
+        if (ledger.members.find((member) => member.id === access.member_id)?.status !== "active") return send(res, 403, { error: "Departed or removed participants cannot attach evidence." });
+      }
       const body = await readJson(req, 11_000_000);
       if (typeof body.dataBase64 !== "string" || body.dataBase64.length > 10_700_000) return send(res, 413, { error: "Evidence exceeds the 8 MB limit." });
       const content = Buffer.from(body.dataBase64, "base64");
@@ -488,8 +577,10 @@ async function route(req, res) {
   }
   if (req.method !== "GET" || url.pathname.startsWith("/api/")) return send(res, 404, { error: "Route not found." });
   const requested = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
+  const publicFiles = new Set(["index.html", "styles.css", "src/app.js", "src/store.js", "src/domain.js", "src/domain/canonical.js", "src/domain/events.js", "src/domain/money.js", "src/domain/narrative.js"]);
+  if (!publicFiles.has(requested) && !/^assets\/[a-zA-Z0-9_-]+\.(png|svg)$/.test(requested)) return send(res, 404, { error: "Not found." });
   const file = resolve(root, requested);
-  if (!file.startsWith(`${root}${sep}`) || !existsSync(file)) return send(res, 404, { error: "Not found." });
+  if (!file.startsWith(`${root}${sep}`) || !existsSync(file) || !statSync(file).isFile() || realpathSync(file) !== file) return send(res, 404, { error: "Not found." });
   res.writeHead(200, { "content-type": mime[extname(file)] ?? "application/octet-stream", "x-content-type-options": "nosniff" });
   createReadStream(file).pipe(res);
 }

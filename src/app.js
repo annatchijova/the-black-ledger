@@ -6,7 +6,7 @@ const view = document.querySelector("#view");
 const storageError = document.querySelector("#storage-error");
 const toast = document.querySelector("#toast");
 let events;
-let route = location.hash.slice(1) || "home";
+let route = location.hash.slice(1).split("/")[0] || "home";
 let toastTimer;
 let pendingEvidenceIds = [];
 const routes = new Set(["home", "members", "expenses", "history", "payments", "verdict"]);
@@ -80,7 +80,15 @@ function memberCard(member, current, showStatusControl = false) {
   const cents = current.balances.get(member.id) || 0;
   const status = member.status ?? "active";
   const statusControl = showStatusControl && getAccessContext().role === "organizer" && !current.archived && status !== "removed" ? `<button class="button button-quiet member-status" type="button" data-member-id="${h(member.id)}" data-next-status="${status === "active" ? "departed" : "active"}">${status === "active" ? "Mark departed" : "Reactivate"}</button>` : "";
-  return `<article class="member-row"><span class="avatar">${h(member.name.trim().slice(0, 1).toUpperCase())}</span><span class="member-name"><b>${h(member.name)}</b><small>${status === "active" ? "Active participant" : h(status)} · Witness ${String(current.members.findIndex((m) => m.id === member.id) + 1).padStart(2, "0")}</small></span><strong class="money ${cents > 0 ? "credit" : cents < 0 ? "debit" : "neutral"}">${cents > 0 ? "+" : cents < 0 ? "−" : ""}${money(Math.abs(cents))}</strong>${statusControl}</article>`;
+  return `<article class="member-row"><span class="avatar">${h(member.name.trim().slice(0, 1).toUpperCase())}</span><span class="member-name"><b>${h(member.name)}</b><small>${status === "active" ? "Active participant" : h(status)} · Witness ${String(current.members.findIndex((m) => m.id === member.id) + 1).padStart(2, "0")}</small></span><strong class="money ${cents > 0 ? "credit" : cents < 0 ? "debit" : "neutral"}">${cents > 0 ? "+" : cents < 0 ? "−" : ""}${money(Math.abs(cents))}</strong>${statusControl}${balanceBreakdown(member, current)}</article>`;
+}
+
+function balanceBreakdown(member, current) {
+  const rows = current.balanceBreakdowns.get(member.id) ?? [];
+  const labels = { expense: "Expense share", conversion_fee: "Conversion fee", carried_in: "Debt carried in", carried_out: "Debt carried out", forgiveness: "Debt forgiven", responsibility_released: "Responsibility released", responsibility_assumed: "Responsibility assumed", payment: "Confirmed payment", payment_refund: "Payment refund" };
+  const signed = (amount) => `${amount > 0 ? "+" : amount < 0 ? "−" : ""}${money(Math.abs(amount))}`;
+  const pending = current.settlements.filter((payment) => ["pending", "asserted"].includes(payment.status) && [payment.fromId, payment.toId].includes(member.id));
+  return `<details class="balance-breakdown"><summary>Where does my balance come from?</summary><p>Positive means you are owed money; negative means you owe money. These are current contributions, not a running timeline.</p>${rows.length ? `<ol>${rows.map((row) => `<li><span><b>${h(labels[row.kind] ?? row.kind)}</b><small>With ${h(current.members.find((item) => item.id === row.counterpartyId)?.name ?? "Unknown participant")}</small><span class="balance-references">${row.eventIds.map((id) => `<a href="#history/${encodeURIComponent(id)}" title="${h(id)}">View event ${h(id.slice(0, 8))}</a>`).join(" · ")}</span></span><strong>${signed(row.deltaMinor)}</strong></li>`).join("")}</ol>` : "<p>No posted contributions.</p>"}<div class="balance-total"><b>Current balance</b><strong>${signed(current.balances.get(member.id) ?? 0)}</strong></div><p>${pending.length} pending payment claim(s), excluded from this balance. Unassigned expenses and reversed payments are also excluded.</p></details>`;
 }
 
 function emptyState(title, body, href, action) {
@@ -260,7 +268,7 @@ function expenseReview(expense, current) {
 function eventDescription(event) {
   if (event.type === "MEMBER_ADDED") return `<b>${h(event.name)}</b> entered the mirror`;
   if (event.type === "MEMBER_INVITED") return `<b>${h(event.name)}</b> was invited as a ${h(event.role)}`;
-  if (event.type === "EXPENSE_RECORDED") return `Expense recorded: <b>${h(event.description)}</b> · ${money(event.totalCents)}`;
+  if (event.type === "EXPENSE_RECORDED") return `Expense recorded: <b>${h(event.description)}</b> · ${money(event.totalCents ?? event.baseAmountMinor ?? event.amountMinor)}`;
   if (event.type === "EXPENSE_UNASSIGNED") return `Unassigned charge recorded: <b>${h(event.description)}</b> · ${money(event.totalCents ?? event.amountMinor)}`;
   if (event.type === "SETTLEMENT_RECORDED") return `Settlement recorded: <b>${h(memberName(event.fromId))}</b> → <b>${h(memberName(event.toId))}</b> · ${money(event.cents)}`;
   if (event.type === "SETTLEMENT_ASSERTED") return `Payment claim pending: <b>${h(memberName(event.fromMemberId))}</b> → <b>${h(memberName(event.toMemberId))}</b> · ${money(event.amountMinor)}`;
@@ -274,7 +282,7 @@ function eventDescription(event) {
 
 function eventRow(event) {
   const icon = { MEMBER_ADDED: "◉", MEMBER_INVITED: "◉", EXPENSE_RECORDED: "⌕", SETTLEMENT_RECORDED: "♢", SETTLEMENT_ASSERTED: "♢", SETTLEMENT_CONFIRMED: "♢", SESSION_ARCHIVED: "▣", SESSION_CLOSED_FINAL: "▣", SESSION_CLOSED_PROVISIONAL: "▣" }[event.type] || "·";
-  return `<article class="event-row"><span class="event-icon">${icon}</span><span class="event-copy"><span>${eventDescription(event)}</span><small>${eventDate(event.at)}</small></span></article>`;
+  return `<article class="event-row" id="event-${h(event.id)}" tabindex="-1"><span class="event-icon">${icon}</span><span class="event-copy"><span>${eventDescription(event)}</span><small>${eventDate(event.at)}</small></span></article>`;
 }
 
 function historyPage(current) {
@@ -292,9 +300,11 @@ function paymentPage(current) {
   const paypalButton = ledgerCurrency() === "USD" ? `<button class="button button-quiet" id="paypal-checkout" type="button">Pay through PayPal Sandbox</button>` : "";
   const forgivenessRows = !current.archived && !readOnly ? current.outstanding.filter((item) => access.role !== "member" || item.creditorId === access.memberId).map((item) => `<form class="forgiveness-form" data-debtor="${h(item.debtorId)}" data-creditor="${h(item.creditorId)}" data-max="${item.amountMinor}"><b>${h(memberName(item.debtorId))} owes ${h(memberName(item.creditorId))}</b><small>Outstanding ${money(item.amountMinor)}</small><label>Forgive amount · ${h(ledgerCurrency())}<input name="amount" inputmode="decimal" required></label><label>Reason<input name="reason" maxlength="300" required></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record partial forgiveness</button></form>`).join("") : "";
   const assumptionRows = !current.archived && access.role === "member" ? current.outstanding.filter((item) => item.debtorId !== access.memberId && item.creditorId !== access.memberId).map((item) => `<form class="assumption-form" data-debtor="${h(item.debtorId)}" data-creditor="${h(item.creditorId)}" data-max="${item.amountMinor}"><b>${h(memberName(item.debtorId))} owes ${h(memberName(item.creditorId))}</b><small>Outstanding ${money(item.amountMinor)}</small><label>Amount you agree to assume · ${h(ledgerCurrency())}<input name="amount" inputmode="decimal" required></label><label>Reason<input name="reason" maxlength="300" placeholder="Why you are taking responsibility" required></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Assume responsibility</button></form>`).join("") : "";
+  const reconciliationRows = access.role === "organizer" ? (current.paymentReconciliations ?? []).map((item) => `<article class="expense-row reconciliation-row"><span class="row-icon payment-icon">!</span><span class="expense-meta"><b>Captured by PayPal, not posted to the ledger</b><small>${h(memberName(item.fromMemberId))} → ${h(memberName(item.toMemberId))} · ${money(item.amountMinor)} · capture ${h(item.captureId)} · ${eventDate(item.occurredAt)}</small><span>${h(item.reason ?? "Review the captured payment against the current obligation.")}</span></span><button type="button" class="button button-quiet retry-reconciliation" data-order-id="${h(item.orderId)}">Retry reconciliation</button></article>`).join("") : "";
   return `${header("The Elixir", "Record a claimed settlement without confusing it for provider proof.", "CHAMBER 04 · THE SETTLEMENT")}
     <section class="feature-card elixir-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/elixir-vial.png" alt=""></div><div><div class="eyebrow">THE VIAL OF DEBT</div><h2>A payment changes the account.</h2><p>A claimed transfer stays pending. Only recipient confirmation or a completed PayPal capture changes balances.</p></div><span class="coming-tag">VERIFIED STATES</span></section>
     ${!enough ? emptyState("Two witnesses are needed.", "Add at least two participants to record a settlement.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect payment states and confirm receipts addressed to you." : "Its settlement history remains available below."}</p></div></div>` : `<form class="form-panel payment-form" id="payment-form"><div class="form-heading"><div><div class="eyebrow">A CLAIM OF PAYMENT</div><h2>Record a settlement</h2></div><span class="form-index">04 / 05</span></div><div class="field-grid"><label>Who paid?<select name="from" required>${payerOptions}</select></label><label>Who received?<select name="to" required>${options}</select></label><label>Amount <span class="field-hint">${h(ledgerCurrency())}</span><input name="amount" inputmode="decimal" placeholder="0.00" required></label></div><div class="honesty-note"><span>i</span><p><b>This remains a pending claim.</b> It does not reduce balances until the recipient confirms the transfer or PayPal reports a completed capture.</p></div><div class="form-footer"><p>A claim must match an outstanding obligation between these participants.</p><div><button class="button button-gold" type="submit">Record pending claim <span>↗</span></button>${paypalButton}</div></div></form>`}
+    ${reconciliationRows ? `<section class="panel reconciliation-panel" role="alert"><div class="section-title"><div><div class="eyebrow">CAPTURED · NOT YET POSTED</div><h2>Payment reconciliation</h2></div><span class="count">${current.paymentReconciliations.length} pending</span></div><p>PayPal reported completed money movement, but the ledger could not safely confirm the corresponding obligation. Retrying never captures again.</p><div class="expense-list">${reconciliationRows}</div></section>` : ""}
     <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">PAYMENT RECORD</div><h2>Settlements recorded</h2></div><span class="count">${current.settlements.length} entries</span></div>${current.settlements.length ? `<div class="expense-list">${[...current.settlements].reverse().map((event) => `<article class="expense-row"><span class="row-icon payment-icon">♢</span><span class="expense-meta"><b>${h(memberName(event.fromId))} → ${h(memberName(event.toId))}</b><small>${h(event.status ?? "recorded")} · ${eventDate(event.at)}</small></span><strong>${money(event.cents)}</strong>${event.status === "pending" && event.rail !== "paypal" && event.toId === access.memberId ? `<button type="button" class="button button-quiet confirm-payment" data-settlement-id="${h(event.settlementId)}">Confirm receipt</button>` : ""}</article>`).join("")}</div>` : emptyState("No settlement has been recorded.", "A claimed payment will be listed here.", "#payments", "Record a settlement")}</section>
     ${forgivenessRows ? `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">A DEBT RELEASED</div><h2>Partial forgiveness</h2></div></div><p>A creditor may forgive part of an outstanding obligation. This is recorded separately from a payment and never implies money changed hands.</p><div class="forgiveness-list">${forgivenessRows}</div></section>` : ""}
     ${assumptionRows ? `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE VOLUNTARY SACRIFICE</div><h2>Assume someone's responsibility</h2></div></div><p>Only the participant accepting the obligation can submit this change. The original debtor's obligation decreases by the same amount that yours increases.</p><div class="forgiveness-list">${assumptionRows}</div></section>` : ""}`;
@@ -311,6 +321,16 @@ function verdictPage(current) {
 }
 
 function bindPage(current) {
+  document.querySelectorAll(".retry-reconciliation").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const sessionId = localStorage.getItem("the-black-ledger.session.v1");
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/payments/${encodeURIComponent(button.dataset.orderId)}/reconcile`, { method: "POST", headers: { authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` } });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Reconciliation could not be completed.");
+      events = await loadLedger(); render(); showToast("Captured payment reconciled without another provider charge.");
+    } catch (error) { showToast(error.message); button.disabled = false; }
+  }));
   document.querySelector("#scenario-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const resultNode = document.querySelector("#scenario-result");
@@ -704,6 +724,12 @@ function render() {
   const pages = { home: homePage, members: membersPage, expenses: expensePage, history: historyPage, payments: paymentPage, verdict: verdictPage };
   view.innerHTML = pages[route](current);
   bindPage(current);
+  if (route === "history" && location.hash.startsWith("#history/")) {
+    let id;
+    try { id = decodeURIComponent(location.hash.slice("#history/".length)); } catch { id = ""; }
+    const target = document.getElementById(`event-${id}`);
+    if (target) { target.scrollIntoView({ block: "center" }); target.focus({ preventScroll: true }); }
+  }
   document.querySelector("#archive-button")?.addEventListener("click", () => {
     const dialog = document.querySelector("#confirm-dialog");
     const blockers = current.closureBlockers;
@@ -716,7 +742,7 @@ document.querySelector("#main-nav").addEventListener("click", (event) => {
   const link = event.target.closest("a[data-route]");
   if (link) route = link.dataset.route;
 });
-window.addEventListener("hashchange", () => { route = location.hash.slice(1) || "home"; render(); });
+window.addEventListener("hashchange", () => { route = location.hash.slice(1).split("/")[0] || "home"; render(); });
 const syncChannel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("the-black-ledger-sync-v1");
 syncChannel?.addEventListener("message", async (event) => {
   if (event.data?.sessionId !== localStorage.getItem("the-black-ledger.session.v1")) return;
@@ -742,7 +768,7 @@ if (paymentReturn.get("payment") === "return" && paymentReturn.get("token")) {
   const sessionId = localStorage.getItem("the-black-ledger.session.v1");
   fetch(`/api/sessions/${encodeURIComponent(sessionId)}/payments/${encodeURIComponent(orderId)}/capture`, { method: "POST", headers: { authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` } })
     .then(async (response) => { const result = await response.json(); if (!response.ok) throw new Error(result.error ?? "PayPal capture failed."); return result; })
-    .then(async (result) => { events = await loadLedger(); render(); showToast(result.status === "COMPLETED" ? "PayPal capture confirmed by the server." : "PayPal payment is still pending confirmation."); })
+    .then(async (result) => { events = await loadLedger(); render(); showToast(result.status === "COMPLETED" ? "PayPal capture confirmed by the server." : result.status === "RECONCILIATION_REQUIRED" ? "PayPal completed the capture. Organizer reconciliation is required before balances change." : "PayPal payment is still pending confirmation."); })
     .catch((error) => showToast(error.message));
 } else if (paymentReturn.get("payment") === "cancel") {
   const orderId = paymentReturn.get("token");

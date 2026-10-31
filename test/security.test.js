@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
+import { verifyEvidencePackage } from "../src/verify-package.js";
 
 async function availablePort() {
   const listener = net.createServer();
@@ -187,4 +188,85 @@ test("API enforces participant authorization and confidential gift visibility", 
     claim: "I was not part of this expense"
   });
   assert.equal(unrelatedDispute.status, 403, "a participant not assigned to an expense must not be able to dispute it");
+  const sourceExposure = await fetch(`${origin}/src/server.js`);
+  assert.equal(sourceExposure.status, 404, "server implementation must not be served as a public asset");
+  for (const resource of ["/.env.example", "/package.json", "/src/verify-package.js", "/src", "/data/ledger.sqlite", "/data/ledger.sqlite-wal"]) {
+    assert.equal((await fetch(`${origin}${resource}`)).status, 404, `${resource} must not be public`);
+  }
+  for (const resource of ["/", "/styles.css", "/src/app.js", "/src/domain.js", "/src/store.js", "/src/domain/events.js", "/src/domain/money.js", "/src/domain/canonical.js", "/src/domain/narrative.js"]) {
+    assert.equal((await fetch(`${origin}${resource}`)).status, 200, `${resource} must remain available`);
+  }
+
+  const recipientExpense = { id: randomUUID(), at: timestamp(), type: "EXPENSE_RECORDED", description: "Recipient's own purchase", payerId: recipient.memberId,
+    amountMinor: 100, baseAmountMinor: 100, currency: "USD", allocations: [{ memberId: recipient.memberId, cents: 100 }] };
+  const privacyKey = randomUUID();
+  const privateWrite = () => fetch(`${origin}/api/sessions/${session.sessionId}/events`, {
+    method: "POST", headers: { authorization: `Bearer ${recipient.accessToken}`, "content-type": "application/json", "Idempotency-Key": privacyKey }, body: JSON.stringify({ event: recipientExpense })
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await privateWrite(); assert.equal(response.status, 201);
+    assert.equal(JSON.stringify(await response.json()).includes(secret), false, "write and idempotent replay responses must hide the recipient's gift description");
+  }
+  const beforeForgery = await (await fetch(`${origin}/api/sessions/${session.sessionId}`, { headers: organizerHeaders })).json();
+  const forgedUnassigned = await addEvent(attacker.accessToken, {
+    id: randomUUID(), at: timestamp(), type: "EXPENSE_UNASSIGNED", description: "Falsely attributed purchase", payerId: recipient.memberId,
+    amountMinor: 100, baseAmountMinor: 100, currency: "USD", allocations: []
+  });
+  assert.equal(forgedUnassigned.status, 403, "unassigned expenses must enforce payer ownership too");
+  const afterForgery = await (await fetch(`${origin}/api/sessions/${session.sessionId}`, { headers: organizerHeaders })).json();
+  assert.equal(afterForgery.headHash, beforeForgery.headHash, "rejected forgery must not append an event");
+  assert.equal(afterForgery.events.filter((event) => event.id === recipientExpense.id).length, 1, "idempotent retries append exactly once");
+  assert.equal(JSON.stringify(afterForgery).includes(secret), true, "organizer retains the complete gift description");
+  const ownUnassigned = await addEvent(attacker.accessToken, {
+    id: randomUUID(), at: timestamp(), type: "EXPENSE_UNASSIGNED", description: "Own purchase pending allocation", payerId: attacker.memberId,
+    amountMinor: 100, baseAmountMinor: 100, currency: "USD", allocations: []
+  });
+  assert.equal(ownUnassigned.status, 201, "participants can still record their own unassigned expenses");
+
+  const secondDeparture = await addEvent(session.accessToken, { id: randomUUID(), at: timestamp(), type: "MEMBER_STATUS_CHANGED", memberId: departed.memberId, status: "departed" });
+  assert.equal(secondDeparture.status, 201);
+  const departedUpload = await fetch(`${origin}/api/sessions/${session.sessionId}/evidence`, {
+    method: "POST", headers: { authorization: `Bearer ${departed.accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ mediaType: "image/png", dataBase64: Buffer.from("unauthorized upload after departure").toString("base64") })
+  });
+  assert.equal(departedUpload.status, 403, "departed participants must not append attachment events");
+
+  const upload = await fetch(`${origin}/api/sessions/${session.sessionId}/evidence`, {
+    method: "POST", headers: organizerHeaders,
+    body: JSON.stringify({ mediaType: "image/png", dataBase64: Buffer.from("export round-trip evidence").toString("base64") })
+  });
+  assert.equal(upload.status, 201);
+  const exported = await fetch(`${origin}/api/sessions/${session.sessionId}/export`, { headers: organizerHeaders });
+  assert.equal(exported.status, 200);
+  const bundle = await exported.json();
+  assert.equal(bundle.evidence.length, 1);
+  assert.deepEqual(verifyEvidencePackage(bundle), { valid: true, problems: [], sessionId: session.sessionId, eventCount: bundle.events.length, evidenceCount: 1 });
+
+  // Two independent clients: the browser store must include an intervening
+  // committed event instead of reconstructing state from its stale snapshot.
+  const nativeFetch = globalThis.fetch;
+  const globals = { localStorage: globalThis.localStorage, location: globalThis.location, history: globalThis.history, BroadcastChannel: globalThis.BroadcastChannel };
+  const stored = new Map([["the-black-ledger.session.v1", session.sessionId], ["the-black-ledger.access.v1", session.accessToken]]);
+  globalThis.localStorage = { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key) };
+  globalThis.location = { hash: "", pathname: "/", search: "" };
+  globalThis.history = { replaceState() {} };
+  globalThis.BroadcastChannel = class { postMessage() {} };
+  globalThis.fetch = (url, options) => nativeFetch(new URL(url, origin), options);
+  try {
+    const store = await import("../src/store.js");
+    const stale = await store.loadLedger();
+    const concurrentId = randomUUID();
+    const concurrent = await addEvent(session.accessToken, { id: concurrentId, at: timestamp(), type: "EXPENSE_RECORDED", description: "Other client's purchase", payerId: attacker.memberId, currency: "USD", amountMinor: 100, allocations: [{ memberId: attacker.memberId, cents: 100 }] });
+    assert.equal(concurrent.status, 201);
+    const refreshed = await store.appendEvent(stale, "EXPENSE_RECORDED", { description: "This client's purchase", payerId: attacker.memberId, currency: "USD", amountMinor: 100, allocations: [{ memberId: attacker.memberId, cents: 100 }] });
+    assert.equal(refreshed.some((item) => item.id === concurrentId), true, "a successful append must refresh intervening events from shared storage");
+    globalThis.fetch = (url, options) => options?.method === "POST" ? nativeFetch(new URL(url, origin), options) : Promise.reject(new Error("Temporary connection loss"));
+    await assert.rejects(store.appendEvent(refreshed, "EXPENSE_RECORDED", { description: "Saved despite refresh failure", payerId: attacker.memberId, currency: "USD", amountMinor: 100, allocations: [{ memberId: attacker.memberId, cents: 100 }] }), (error) => error.recorded === true && error.message.includes("entry was saved"));
+    const recovered = await (await nativeFetch(`${origin}/api/sessions/${session.sessionId}`, { headers: organizerHeaders })).json();
+    assert.equal(recovered.events.filter((item) => item.description === "Saved despite refresh failure").length, 1);
+  } finally {
+    globalThis.fetch = nativeFetch;
+    for (const [key, value] of Object.entries(globals)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
+  }
+
 });

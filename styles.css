@@ -1161,3 +1161,15 @@ color:var(--muted);
 font-size:10px}
 .forgiveness-form input{width:100%}
 @media(max-width:650px){.forgiveness-form{grid-template-columns:1fr}}
+
+.member-row { flex-wrap: wrap; }
+.balance-breakdown { flex-basis: 100%; grid-column: 1 / -1; width: 100%; margin-top: .75rem; text-align: left; }
+.balance-breakdown summary { cursor: pointer; color: var(--gold, #d4b478); font-size: .85rem; }
+.balance-breakdown p { font-size: .8rem; line-height: 1.6; opacity: .8; }
+.balance-breakdown ol { list-style: none; margin: 1rem 0; padding: 0; }
+.balance-breakdown li, .balance-total { display: flex; justify-content: space-between; gap: 1rem; padding: .75rem 0; border-top: 1px solid rgba(160, 140, 110, .2); }
+.balance-breakdown li > span { min-width: 0; }
+.balance-breakdown small, .balance-references { display: block; font-size: .75rem; margin-top: .35rem; }
+.balance-references a { color: inherit; overflow-wrap: anywhere; }
+.balance-breakdown strong { white-space: nowrap; font-size: .85rem; }
+.event-row:focus { outline: 2px solid #d4b478; outline-offset: 4px; }

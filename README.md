@@ -14,18 +14,20 @@ Open `http://127.0.0.1:4173`. Copy `.env.example` to `.env` to configure integra
 
 ## Verify changes
 
-Run the automated API security checks with `npm test`. The security test starts an isolated local server and stores its SQLite database in a temporary directory. It does not contact PayPal or the OpenAI API.
+Run the automated API security and offline evidence verification checks with `npm test`. The security test starts an isolated local server and stores its SQLite database in a temporary directory. Tests do not contact real PayPal or OpenAI services; payment tests use a loopback-only provider double, including concurrent capture and post-confirmation recovery.
 
 ## Current implementation
 
 - Exact money parsing, rational FX conversion with half-even rounding, and deterministic remainder allocation.
 - Versioned canonical serialization and a hash-chained SQLite event log. Writes use SQLite transactions and idempotency keys.
 - Domain events for session agreements, members and witnesses, subgroups, assigned and unassigned expenses, corrections, receipt discrepancies, confirmations, commitments, refunds, settlements, reversals, forgiveness, responsibility transfers, budgets, recurring rules, evidence, gifts, and closure states.
+- Per-person balance breakdowns with exact signed contributions and links to their source events; pending claims stay separate.
 - Deterministic net-settlement suggestions, hypothetical event simulation, possible-duplicate suggestions, and explicit closure blockers.
 - Evidence upload with an 8 MB bound and SHA-256 digest.
 - Session access tokens with organizer, participant, and read-only witness roles; surprise-gift descriptions are hidden from the recipient's event view.
 - Participant expense and payment actions are constrained to the participant's own identity; only the payment recipient can confirm receipt.
 - Server-side PayPal Sandbox checkout through Orders v2. Checkout is restricted to an outstanding USD obligation owed to the configured merchant participant. The server reserves the amount, creates an idempotent order, and posts a settlement only after a completed capture.
+- Organizer reconciliation for completed provider captures that cannot safely be posted. Captured money is persisted separately, does not change balances until reconciled, and can be retried without another provider charge.
 - Optional receipt proposals from the OpenAI Responses API. The returned extraction is a proposal and requires manual review.
 
 ## API outline
@@ -49,6 +51,10 @@ PayPal Sandbox checkout uses server-side `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECR
 
 An exported evidence package can be checked offline with `node src/verify-package.js <evidence-package.json>`.
 
+The verifier checks the package hash, every event proof, session identity and base currency, financial history through the domain engine, and the correspondence between attachment events, metadata, and canonical base64 bytes. Malformed packages produce a structured failure. Exit codes are `0` for a valid package, `1` for a failed verification, and `2` for a missing argument, unreadable file, or invalid JSON.
+
+These are consistency checks, not digital signatures: someone able to replace the entire package can rewrite a coherent history and recompute all hashes. To detect that replacement, compare the package hash or event head against a previously trusted copy obtained separately. Successful verification does not authenticate participants, prove their assertions, or imply that balances are settled.
+
 ## Financial boundaries
 
 Receipt interpretation and scenario language can only produce proposals. A person must review proposed financial facts before recording them. Pending or claimed payments do not reduce debt. Corrections, forgiveness, and responsibility changes are distinct events. Simulations do not append events. A final close reports unresolved records instead of hiding them.
@@ -57,4 +63,4 @@ Receipt interpretation and scenario language can only produce proposals. A perso
 
 MIT. See [LICENSE](LICENSE).
 
-The threat model and latest adversarial review are documented in [the security audit](docs/SECURITY-AUDIT-2026-10-25.md).
+The threat model and latest adversarial review are documented in [the security audit](docs/SECURITY-AUDIT-2026-10-30.md).

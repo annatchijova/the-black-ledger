@@ -93,8 +93,13 @@ export async function appendEvent(currentEvents, type, fields) {
   const result = await request(`${api(sessionId)}/events`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ event }) });
   appendWarnings = result.possibleDuplicates ?? [];
   updates?.postMessage({ sessionId, eventId: result.event.id });
-  const nextEvents = [...(currentEvents.filter((item) => item.id !== event.id)), result.event];
-  return parseEventLog(nextEvents, baseCurrency);
+  try {
+    const refreshed = await request(api(sessionId));
+    accessContext = refreshed.access ?? accessContext;
+    return parseEventLog(refreshed.events, eventBaseCurrency(refreshed.events));
+  } catch (cause) {
+    throw Object.assign(new Error("The entry was saved, but the latest shared history could not be loaded. Reload before adding it again."), { recorded: true, eventId: result.event.id, cause });
+  }
 }
 
 export function takeAppendWarnings() {
