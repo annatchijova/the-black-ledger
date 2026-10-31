@@ -45,6 +45,11 @@ for (const column of ["provider_amount_value TEXT", "provider_currency TEXT", "p
   }
 }
 
+// Evidence is served back to participants from this origin, so the stored type
+// is an allowlist rather than whatever the uploader claimed. Anything outside it
+// could be served as active content on the app's own origin.
+const EVIDENCE_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml", ".json": "application/json" };
 const send = (res, status, body, headers = {}) => { res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers }); res.end(JSON.stringify(body)); };
 const sha = (value) => createHash("sha256").update(value).digest("hex");
@@ -200,7 +205,7 @@ async function route(req, res) {
     const response = append(sessionId, createEvent, `create:${sessionId}`);
     return send(res, 201, { sessionId, accessToken, ...response });
   }
-  const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,100})(?:\/(events|evidence|export|analysis\/(?:receipt|scenario)|simulate|invitations|carry-debt|payments(?:\/[A-Z0-9-]+\/(?:capture|cancel|reconcile))?))?$/.exec(url.pathname);
+  const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,100})(?:\/(events|evidence|export|analysis\/(?:receipt|scenario)|simulate|invitations|carry-debt|evidence\/[a-zA-Z0-9_-]{1,100}|payments(?:\/[A-Z0-9-]+\/(?:capture|cancel|reconcile))?))?$/.exec(url.pathname);
   if (match) {
     const [, sessionId, resource] = match;
     const session = db.prepare("SELECT id, base_currency FROM sessions WHERE id = ?").get(sessionId);
@@ -580,6 +585,23 @@ async function route(req, res) {
       completeOrderRows(sessionId, orderId, record.capture_id);
       return send(res, 200, { status: "COMPLETED", orderId, captureId: record.capture_id, event: confirmed.event, headHash: confirmed.headHash, reconciled: true });
     }
+    if (req.method === "GET" && /^evidence\/[a-zA-Z0-9_-]{1,100}$/.test(resource ?? "")) {
+      const evidenceId = resource.split("/")[1];
+      const row = db.prepare("SELECT media_type, byte_length, content FROM evidence WHERE id = ? AND session_id = ?").get(evidenceId, sessionId);
+      if (!row) return send(res, 404, { error: "Not found." });
+      // Belt and braces: rows stored before the upload allowlist existed are
+      // downloaded rather than rendered, and nothing is ever content-sniffed.
+      const renderable = EVIDENCE_MEDIA_TYPES.has(String(row.media_type).toLowerCase());
+      res.writeHead(200, {
+        "content-type": renderable ? row.media_type : "application/octet-stream",
+        "content-length": row.byte_length,
+        "cache-control": "private, no-store",
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; sandbox",
+        ...(renderable ? {} : { "content-disposition": `attachment; filename="${evidenceId}"` })
+      });
+      return res.end(row.content);
+    }
     if (req.method === "POST" && resource === "evidence") {
       if (access.role === "member") {
         const ledger = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
@@ -589,13 +611,18 @@ async function route(req, res) {
       if (typeof body.dataBase64 !== "string" || body.dataBase64.length > 10_700_000) return send(res, 413, { error: "Evidence exceeds the 8 MB limit." });
       const content = Buffer.from(body.dataBase64, "base64");
       if (!content.length || content.length > 8_000_000 || content.toString("base64").replace(/=+$/, "") !== body.dataBase64.replace(/=+$/, "")) return send(res, 400, { error: "Evidence encoding is invalid or exceeds the 8 MB limit." });
-      const digest = sha(content); const mediaType = String(body.mediaType ?? "application/octet-stream").slice(0, 80);
+      const mediaType = String(body.mediaType ?? "").toLowerCase();
+      if (!EVIDENCE_MEDIA_TYPES.has(mediaType)) return send(res, 415, { error: `Attach a photo as ${[...EVIDENCE_MEDIA_TYPES].join(", ")}.` });
+      const digest = sha(content);
+      // A photo can stand on its own as a reference with a note and no expense,
+      // so the note travels with the event rather than with an expense record.
+      const note = typeof body.note === "string" && body.note.trim() ? body.note.trim().slice(0, 240) : undefined;
       const duplicate = db.prepare("SELECT id, media_type, byte_length FROM evidence WHERE session_id = ? AND sha256 = ?").get(sessionId, digest);
       if (duplicate) {
         if (duplicate.media_type !== mediaType) return send(res, 409, { error: "Identical evidence bytes were already attached under a different media type." });
         const existingEvent = getEvents(sessionId).events.find((event) => event.type === "EVIDENCE_ATTACHED" && event.evidenceId === duplicate.id);
         if (existingEvent) return send(res, 200, { id: duplicate.id, sha256: digest, mediaType, byteLength: duplicate.byte_length, event: existingEvent, duplicate: true });
-        const event = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "EVIDENCE_ATTACHED", evidenceId: duplicate.id, contentHash: digest, mediaType, byteLength: duplicate.byte_length };
+        const event = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "EVIDENCE_ATTACHED", evidenceId: duplicate.id, contentHash: digest, mediaType, byteLength: duplicate.byte_length, ...(note ? { note } : {}) };
         const attached = append(sessionId, event, `evidence-${duplicate.id}`);
         return send(res, 201, { id: duplicate.id, sha256: digest, mediaType, byteLength: duplicate.byte_length, event: attached.event, headHash: attached.headHash });
       }
@@ -604,7 +631,7 @@ async function route(req, res) {
       const id = randomUUID().replaceAll("-", "");
       db.prepare("INSERT INTO evidence(id, session_id, sha256, media_type, byte_length, content) VALUES (?, ?, ?, ?, ?, ?)").run(id, sessionId, digest, mediaType, content.length, content);
       try {
-        const event = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "EVIDENCE_ATTACHED", evidenceId: id, contentHash: digest, mediaType, byteLength: content.length };
+        const event = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "EVIDENCE_ATTACHED", evidenceId: id, contentHash: digest, mediaType, byteLength: content.length, ...(note ? { note } : {}) };
         const attached = append(sessionId, event, `evidence-${id}`);
         return send(res, 201, { id, sha256: digest, mediaType, byteLength: content.length, event: attached.event, headHash: attached.headHash });
       } catch (error) {

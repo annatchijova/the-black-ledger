@@ -1173,3 +1173,18 @@ font-size:10px}
 .balance-references a { color: inherit; overflow-wrap: anywhere; }
 .balance-breakdown strong { white-space: nowrap; font-size: .85rem; }
 .event-row:focus { outline: 2px solid #d4b478; outline-offset: 4px; }
+
+.evidence-thumb{
+display:block;
+margin-top:8px}
+.evidence-thumb img{
+display:block;
+width:100%;
+max-width:260px;
+height:auto;
+border:1px solid #403629;
+border-radius:6px;
+background:#171411}
+#receipt-note{
+flex:1 1 220px;
+min-width:0}

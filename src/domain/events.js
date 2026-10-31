@@ -264,6 +264,8 @@ export function validateEvent(event, baseCurrency = "USD") {
       requireId(event.evidenceId, "Evidence ID"); requireText(event.contentHash, "Evidence content hash", 64); requireText(event.mediaType, "Evidence media type", 80);
       if (!/^[a-f0-9]{64}$/i.test(event.contentHash)) fail("Evidence content hash must be a SHA-256 digest.");
       if (!Number.isSafeInteger(event.byteLength) || event.byteLength < 1 || event.byteLength > 8_000_000) fail("Evidence file exceeds the 8 MB limit.");
+      // Optional, so every event recorded before notes existed stays valid.
+      if (event.note !== undefined) requireText(event.note, "Photo note", 240);
       break;
     case "SURPRISE_GIFT_RECORDED":
       requireId(event.giftId, "Gift ID"); requireId(event.recipientMemberId, "Gift recipient"); requireId(event.payerMemberId, "Gift payer"); requireText(event.privateDescription, "Gift description", 240); requireAmount(event.amountMinor);
