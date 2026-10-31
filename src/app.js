@@ -13,7 +13,9 @@ const routes = new Set(["home", "members", "expenses", "history", "payments", "v
 const h = (text) => String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const eventDate = (iso) => new Date(iso).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
 const ledgerCurrency = () => events?.find((event) => event.type === "SESSION_CREATED")?.baseCurrency ?? "USD";
-const money = (minor) => formatMoney(minor, ledgerCurrency());
+// The viewer's own locale, so an ARS ledger reads 1.500,00 rather than 1,500.00.
+const displayLocale = typeof navigator !== "undefined" && navigator.language ? navigator.language : "en-US";
+const money = (minor) => formatMoney(minor, ledgerCurrency(), displayLocale);
 const parseLedgerAmount = (value) => parseAmountToMinor(value, ledgerCurrency());
 const ledger = () => deriveLedger(events, { baseCurrency: ledgerCurrency() });
 const memberName = (id) => ledger().members.find((m) => m.id === id)?.name ?? "Unknown participant";
@@ -124,7 +126,7 @@ function expensePage(current) {
   const feePayerOptions = activeMembers.map((member) => `<option value="${h(member.id)}">${h(member.name)}</option>`).join("");
   return `${header("The Black Telephone", "Every expense leaves a trace. Every share has a rule.", "CHAMBER 02 · THE EVIDENCE")}
     <section class="feature-card phone-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/black-telephone.png" alt=""></div><div><div class="eyebrow">THE RECEIPT IS EVIDENCE</div><h2>Enter what happened.</h2><p>Receipt analysis proposes details for a person to review. It never writes into the ledger by itself.</p></div><span class="coming-tag">HUMAN REVIEW</span></section>
-    ${!current.archived && !readOnly ? `<section class="form-panel"><label for="receipt-image">Receipt image</label><div class="input-row"><input id="receipt-image" type="file" accept="image/jpeg,image/png,image/webp"><button class="button button-quiet" id="analyze-receipt" type="button">Propose receipt details</button></div><pre id="receipt-proposal" hidden aria-live="polite"></pre></section>` : ""}
+    ${!current.archived && !readOnly ? `<section class="form-panel"><label for="receipt-image">Photo</label><div class="input-row"><input id="receipt-image" type="file" accept="image/jpeg,image/png,image/webp"><input id="receipt-note" type="text" maxlength="240" placeholder="Note, optional (what it is, or what you want to buy)"><button class="button button-quiet" id="analyze-receipt" type="button">Attach photo</button></div><p class="field-hint">The photo is kept in the history whether or not it can be read. Record an expense for it only if money was spent.</p><pre id="receipt-proposal" hidden aria-live="polite"></pre></section>` : ""}
     ${!enough ? emptyState("The table is empty.", "Enter at least one participant before recording a cost.", "#members", "Open the Broken Mirror") : current.archived || readOnly ? `<div class="sealed-banner"><span>✦</span><div><b>${readOnly ? "Read-only witness access." : "This ledger is read-only."}</b><p>${readOnly ? "You can inspect the expenses and their evidence." : "Start another ledger to record new expenses."}</p></div></div>` : `<form class="form-panel expense-form" id="expense-form"><div class="form-heading"><div><div class="eyebrow">A NEW ENTRY</div><h2>Record an expense</h2></div><span class="form-index">02 / 05</span></div><div class="field-grid"><label>Description<input name="description" maxlength="120" placeholder="Dinner, train tickets…" required></label><label>Receipt currency<select name="currency" id="expense-currency">${currencyOptions}</select></label><label><span id="source-total-label">Total amount · ${h(ledgerCurrency())}</span><input name="amount" inputmode="decimal" required></label><label>Paid by<select name="payer" required><option value="unassigned">Unknown / unassigned</option>${payerOptions.map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`).join("")}</select></label><label>Allocation rule<select name="splitMode" id="split-mode"><option value="equal">Split equally</option><option value="custom">Enter each share</option></select></label>${groupOptions ? `<label>Apply a subgroup<select name="group" id="expense-group"><option value="">All participants</option>${groupOptions}</select></label>` : ""}</div><fieldset id="fx-fields" class="form-panel fx-fields" hidden><legend>Conversion evidence · target ${h(ledgerCurrency())}</legend><div class="field-grid"><label>Ledger total · ${h(ledgerCurrency())}<input name="baseAmount" inputmode="decimal"></label><label>${h(ledgerCurrency())} per 1 <span id="fx-source-currency">foreign unit</span><input name="fxRate" inputmode="decimal" placeholder="1.08"></label><label>Rate source<input name="fxSource" maxlength="120" placeholder="Card statement, exchange receipt…"></label><label>Rate observed at<input name="fxObservedAt" type="datetime-local"></label><label>Conversion fee · ${h(ledgerCurrency())}<input name="fxFee" inputmode="decimal" value="0"></label><label>Fee paid by<select name="fxFeePayer"><option value="">No conversion fee</option>${feePayerOptions}</select></label></div><p class="field-hint">Enter the rate as an exact decimal. The converted total and fee must reconcile to the ledger total.</p></fieldset><fieldset class="beneficiary-fieldset"><legend>Who benefited from this expense?</legend><div class="check-grid">${rows}</div></fieldset><div id="custom-shares" class="custom-shares" hidden></div><div class="form-footer"><p>Shares reconcile to the ledger total. Unknown charges stay unassigned until identified.</p><button class="button button-gold" type="submit">Write into the ledger <span>↗</span></button></div></form>`}
     <section class="panel history-panel"><div class="section-title"><div><div class="eyebrow">THE RECORD</div><h2>Recorded expenses</h2></div><span class="count">${current.expenses.length} entries</span></div>${current.expenses.length ? `<div class="expense-list">${[...current.expenses].reverse().map((expense) => expenseRow(expense, current)).join("")}</div>` : emptyState("Nothing has been recorded.", "The first expense will appear here.", "#expenses", "Record an expense")}</section>
     ${commitmentSection(current)}
@@ -276,6 +278,7 @@ function eventDescription(event) {
   if (event.type === "SESSION_CLOSED_PROVISIONAL") return `<b>A provisional close was recorded.</b> ${h(event.reason)}`;
   if (event.type === "SESSION_CLOSED_FINAL") return "<b>The journey was finally closed.</b>";
   if (event.type === "SESSION_ARCHIVED") return `<b>The journey was archived.</b>${event.provisional ? " Open balances remained." : " The account was balanced."}`;
+  if (event.type === "EVIDENCE_ATTACHED") return `${event.note ? `Photo: <b>${h(event.note)}</b>` : "Photo attached"}<span class="evidence-thumb"><img data-evidence="${h(event.evidenceId)}" alt="${h(event.note ?? "Attached photo")}"></span>`;
   if (event.type === "SESSION_CREATED") return `<b>${h(event.name)}</b> opened a ledger in ${h(event.baseCurrency)}`;
   return `${h(event.type.replaceAll("_", " ").toLowerCase())} recorded`;
 }
@@ -365,30 +368,49 @@ function bindPage(current) {
     try {
       if (!file || file.size > 8_000_000) throw new Error("Choose an image no larger than 8 MB.");
       if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(file.type)) throw new Error("Choose a JPEG, PNG, or WebP image.");
-      output.hidden = false; output.textContent = "Reading receipt…";
+      output.hidden = false; output.textContent = "Attaching photo…";
       const bytes = new Uint8Array(await file.arrayBuffer());
       let binary = "";
       for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-      const sessionId = localStorage.getItem("the-black-ledger.session.v1");
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/analysis/receipt`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` }, body: JSON.stringify({ mediaType: file.type, dataBase64: btoa(binary) }) });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Receipt analysis failed.");
       const dataBase64 = btoa(binary);
-      const evidenceResponse = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/evidence`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` }, body: JSON.stringify({ mediaType: file.type, dataBase64 }) });
+      const sessionId = localStorage.getItem("the-black-ledger.session.v1");
+      const token = localStorage.getItem("the-black-ledger.access.v1");
+
+      // The photo is the evidence; reading it is a convenience. Attach it first,
+      // so a photo that is not a receipt at all, or an unavailable reader, still
+      // leaves the image in the history instead of discarding it.
+      const note = document.querySelector("#receipt-note")?.value?.trim();
+      const evidenceResponse = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/evidence`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ mediaType: file.type, dataBase64, ...(note ? { note } : {}) }) });
       const evidence = await evidenceResponse.json();
-      if (!evidenceResponse.ok) throw new Error(evidence.error ?? "Could not attach receipt evidence.");
+      if (!evidenceResponse.ok) throw new Error(evidence.error ?? "Could not attach the photo.");
       if (!events.some((item) => item.id === evidence.event.id)) events = [...events, evidence.event];
       if (!pendingEvidenceIds.includes(evidence.id)) pendingEvidenceIds.push(evidence.id);
-      output.textContent = JSON.stringify(result.proposal, null, 2);
+      render();
+
+      output.textContent = "Photo attached. Reading it\u2026";
+      let proposal = null; let readerMessage = "";
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/analysis/receipt`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ mediaType: file.type, dataBase64 }) });
+        const result = await response.json();
+        if (response.ok) proposal = result.proposal;
+        else readerMessage = result.error ?? "the reader returned an error";
+      } catch { readerMessage = "the reader could not be reached"; }
+
+      if (!proposal) {
+        output.textContent = `Photo attached and recorded in the history.\n\nIt was not read automatically (${readerMessage}), so type the description and amount yourself. Leave the amount empty if this is only a reference.`;
+        showToast("Photo attached. Enter the details by hand.");
+        return;
+      }
+      output.textContent = JSON.stringify(proposal, null, 2);
       const form = document.querySelector("#expense-form");
-      const proposalCurrency = String(result.proposal.currency ?? "").toUpperCase();
+      const proposalCurrency = String(proposal.currency ?? "").toUpperCase();
       if (form && proposalCurrency && SUPPORTED_CURRENCIES.includes(proposalCurrency)) {
         form.elements.currency.value = proposalCurrency;
         form.elements.currency.dispatchEvent(new Event("change"));
       }
-      if (form && result.proposal.merchant) form.elements.description.value = result.proposal.merchant;
-      if (form && result.proposal.total) form.elements.amount.value = result.proposal.total;
-      showToast("Proposal ready and receipt evidence attached. Review each value before recording.");
+      if (form && proposal.merchant) form.elements.description.value = proposal.merchant;
+      if (form && proposal.total) form.elements.amount.value = proposal.total;
+      showToast("Photo attached and a proposal is ready. Review each value before recording.");
     } catch (error) { if (output) { output.hidden = false; output.textContent = error.message; } }
   });
 
@@ -715,6 +737,24 @@ function bindPage(current) {
   }));
 }
 
+let evidenceObjectUrls = [];
+async function hydrateEvidenceImages() {
+  for (const url of evidenceObjectUrls) URL.revokeObjectURL(url);
+  evidenceObjectUrls = [];
+  const sessionId = localStorage.getItem("the-black-ledger.session.v1");
+  const token = localStorage.getItem("the-black-ledger.access.v1");
+  if (!sessionId || !token) return;
+  for (const image of document.querySelectorAll("img[data-evidence]")) {
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/evidence/${encodeURIComponent(image.dataset.evidence)}`, { headers: { authorization: `Bearer ${token}` } });
+      if (!response.ok) { image.replaceWith(Object.assign(document.createElement("small"), { textContent: "Photo unavailable." })); continue; }
+      const url = URL.createObjectURL(await response.blob());
+      evidenceObjectUrls.push(url);
+      image.src = url;
+    } catch { image.replaceWith(Object.assign(document.createElement("small"), { textContent: "Photo unavailable." })); }
+  }
+}
+
 function render() {
   if (!events) return;
   const current = ledger();
@@ -724,6 +764,7 @@ function render() {
   const pages = { home: homePage, members: membersPage, expenses: expensePage, history: historyPage, payments: paymentPage, verdict: verdictPage };
   view.innerHTML = pages[route](current);
   bindPage(current);
+  hydrateEvidenceImages();
   if (route === "history" && location.hash.startsWith("#history/")) {
     let id;
     try { id = decodeURIComponent(location.hash.slice("#history/".length)); } catch { id = ""; }
