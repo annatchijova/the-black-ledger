@@ -22,7 +22,7 @@ test("API enforces participant authorization and confidential gift visibility", 
   const port = await availablePort();
   const child = spawn(process.execPath, ["--experimental-sqlite", "src/server.js"], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", LEDGER_DATA_DIR: dataDir },
+    env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", LEDGER_DATA_DIR: dataDir, OPENAI_API_KEY: "" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   let logs = "";
@@ -95,6 +95,26 @@ test("API enforces participant authorization and confidential gift visibility", 
 
   const witnessWrite = await addEvent(witness.accessToken, { id: randomUUID(), at: timestamp(), type: "SESSION_REOPENED" });
   assert.equal(witnessWrite.status, 403, "a read-only witness must not write events");
+  const witnessAnalysis = await fetch(`${origin}/api/sessions/${session.sessionId}/analysis/scenario`, {
+    method: "POST", headers: { authorization: `Bearer ${witness.accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Simulate a harmless hypothetical" })
+  });
+  assert.equal(witnessAnalysis.status, 403, "a read-only witness must not invoke paid analysis endpoints");
+  const witnessReceipt = await fetch(`${origin}/api/sessions/${session.sessionId}/analysis/receipt`, {
+    method: "POST", headers: { authorization: `Bearer ${witness.accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ mediaType: "image/png", dataBase64: "AA==" })
+  });
+  assert.equal(witnessReceipt.status, 403, "a read-only witness must not invoke receipt analysis either");
+  const departedAnalysis = await fetch(`${origin}/api/sessions/${session.sessionId}/analysis/scenario`, {
+    method: "POST", headers: { authorization: `Bearer ${departed.accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Simulate a harmless hypothetical" })
+  });
+  assert.equal(departedAnalysis.status, 403, "a departed participant must not invoke paid analysis endpoints");
+  const activeAnalysis = await fetch(`${origin}/api/sessions/${session.sessionId}/analysis/scenario`, {
+    method: "POST", headers: { authorization: `Bearer ${attacker.accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Simulate a harmless hypothetical" })
+  });
+  assert.equal(activeAnalysis.status, 503, "an active participant remains eligible; this isolated server has no provider key");
 
   const forgedPayer = await addEvent(attacker.accessToken, {
     id: randomUUID(), at: timestamp(), type: "EXPENSE_RECORDED", description: "Forged payer",

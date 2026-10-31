@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { canonicalStringify } from "./domain/canonical.js";
 import { deriveNarrativeEvents, narrativePattern } from "./domain/narrative.js";
 import { deriveLedger, parseEventLog, parseAmountToMinor, simulateLedger, findPossibleDuplicates } from "./domain.js";
+import { assertAnalysisAccess, reserveAnalysisCapacity } from "./analysis-access.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PAYPAL_APPROVAL_TTL_MS = 6 * 60 * 60 * 1000;
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS session_tokens (token_hash TEXT PRIMARY KEY, session_
 CREATE TABLE IF NOT EXISTS paypal_orders (order_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, status TEXT NOT NULL, capture_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS paypal_order_requests (session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, status TEXT NOT NULL, order_id TEXT, approval_url TEXT, created_at TEXT NOT NULL, PRIMARY KEY(session_id, request_id));
 CREATE TABLE IF NOT EXISTS session_patterns (session_id TEXT PRIMARY KEY REFERENCES sessions(id), pattern TEXT NOT NULL, recorded_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS analysis_usage (scope_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, request_count INTEGER NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS evidence_session_digest ON evidence(session_id, sha256);
 `);
 
@@ -148,6 +150,10 @@ async function route(req, res) {
     const bearer = /^Bearer ([A-Za-z0-9_-]{32,100})$/.exec(req.headers.authorization ?? "")?.[1];
     const access = bearer ? db.prepare("SELECT role, member_id FROM session_tokens WHERE token_hash = ? AND session_id = ? AND revoked_at IS NULL").get(sha(bearer), sessionId) : null;
     if (!access) return send(res, 401, { error: "A valid session access token is required." });
+    if (req.method === "POST" && ["analysis/receipt", "analysis/scenario"].includes(resource)) {
+      const analysisLedger = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
+      assertAnalysisAccess(access, analysisLedger);
+    }
     if (req.method === "POST" && ["events", "payments", "evidence", "invitations"].includes((resource ?? "").split("/")[0]) && access.role === "witness") return send(res, 403, { error: "Witness access is read-only." });
     if (req.method === "GET" && (!resource || resource === "events")) {
       const { events, headHash } = getEvents(sessionId); const ledger = deriveLedger(events, { baseCurrency: session.base_currency });
@@ -235,6 +241,7 @@ async function route(req, res) {
       const image = Buffer.from(body.dataBase64, "base64");
       if (!image.length || image.length > 8_000_000 || image.toString("base64").replace(/=+$/, "") !== body.dataBase64.replace(/=+$/, "")) return send(res, 400, { error: "Receipt image encoding is invalid or exceeds the 8 MB limit." });
       const schema = { type: "object", additionalProperties: false, required: ["merchant", "date", "currency", "total", "items", "uncertainties"], properties: { merchant: { type: ["string", "null"] }, date: { type: ["string", "null"] }, currency: { type: ["string", "null"] }, total: { type: ["string", "null"] }, items: { type: "array", items: { type: "object", additionalProperties: false, required: ["description", "quantity", "amount", "confidence"], properties: { description: { type: "string" }, quantity: { type: ["string", "null"] }, amount: { type: ["string", "null"] }, confidence: { type: "number" } } } }, uncertainties: { type: "array", items: { type: "string" } } } };
+      reserveAnalysisCapacity(db, { sessionId, principalId: access.member_id ?? access.role });
       const aiResponse = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: process.env.OPENAI_RECEIPT_MODEL ?? "gpt-4.1-mini", store: false, input: [{ role: "user", content: [{ type: "input_text", text: "Extract only facts visible on this receipt. Preserve decimal strings exactly. Do not infer missing values. Mark ambiguity in uncertainties. This is a proposal for human review and will not be recorded automatically." }, { type: "input_image", image_url: `data:${mediaType};base64,${body.dataBase64}` }] }], text: { format: { type: "json_schema", name: "receipt_proposal", strict: true, schema } } }), signal: AbortSignal.timeout(40_000) });
       if (!aiResponse.ok) return send(res, 502, { error: "Receipt analysis provider returned an error." });
       const result = await aiResponse.json();
@@ -254,6 +261,7 @@ async function route(req, res) {
       const ledger = deriveLedger(currentEvents, { baseCurrency: session.base_currency });
       const schema = { type: "object", additionalProperties: false, required: ["expenses", "uncertainties"], properties: { expenses: { type: "array", maxItems: 5, items: { type: "object", additionalProperties: false, required: ["description", "payerId", "amount", "allocations"], properties: { description: { type: "string" }, payerId: { type: "string" }, amount: { type: "string" }, allocations: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false, required: ["memberId", "amount"], properties: { memberId: { type: "string" }, amount: { type: "string" } } } } } } }, uncertainties: { type: "array", maxItems: 20, items: { type: "string" } } } };
       const promptContext = { request: prompt, baseCurrency: session.base_currency, participants: ledger.members.map((member) => ({ id: member.id, name: member.name })), currentBalancesMinor: Object.fromEntries(ledger.balances) };
+      reserveAnalysisCapacity(db, { sessionId, principalId: access.member_id ?? access.role });
       const aiResponse = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: process.env.OPENAI_RECEIPT_MODEL ?? "gpt-4.1-mini", store: false, max_output_tokens: 3000, input: [{ role: "user", content: [{ type: "input_text", text: `Translate the user's hypothetical into at most five proposed shared expenses. Use only participant IDs provided. Express amounts as ordinary decimal strings in ${session.base_currency}; do not calculate balances or infer missing facts. Return uncertainties when a payer, beneficiary, amount, or split is unclear. These records are simulation-only and must never be saved. Context: ${JSON.stringify(promptContext)}` }] }], text: { format: { type: "json_schema", name: "scenario_proposal", strict: true, schema } } }), signal: AbortSignal.timeout(40_000) });
       if (!aiResponse.ok) return send(res, 502, { error: "Scenario analysis provider returned an error." });
       const aiResult = await aiResponse.json();
