@@ -220,3 +220,43 @@ It is written down here only as part of the observed response shape, which earli
 ### Still unverified
 
 R2-1 rests on the premise that a provider can return a completed capture whose currency is outside the supported table, or whose precision exceeds it. This run observed one capture, in the normal shape, and so neither confirms nor refutes that premise. The remediation stands on its own as defensive handling of an input the code's own currency-mismatch guard already anticipated, but the triggering scenario remains a modelled assumption rather than an observed provider behaviour, and is labelled as such.
+
+---
+
+## Variant analysis — the dead-surface class
+
+**Base:** `main` @ `c4f058a`
+**Lead:** the organizer reconciliation inbox rendering nothing, fixed in `fab69c2`.
+
+### The invariant, not the symptom
+
+The client keeps two state origins. The derived ledger is a pure function of the event log; the server's `publicState` additionally carries fields held outside that log, in tables of their own. Both are plain objects with overlapping key names, nothing marks which origin owns which field, and a read from the wrong one yields `undefined`, which renders as an empty panel rather than an error.
+
+Stated once: **a render surface read its data from a source structurally incapable of producing it, and the miss degraded silently to empty instead of failing.**
+
+### Sweep
+
+Four axes, each enumerated rather than sampled. Hits and no-hits both recorded.
+
+| Axis | Method | Result |
+| --- | --- | --- |
+| Fields read off the derived ledger | all 20 `current.<field>` reads in the client against the key set `deriveLedger` actually returns at runtime | no further misses |
+| Fields read off the server state | every `getServerState().<field>` read against `publicState`'s keys | one read, `paymentReconciliations`, which the server does expose |
+| Shape confusion within a valid field | every `current.<field>.<method>` against each field's real runtime type, looking for a `Map` used as an array or the reverse | none |
+| Fields read off HTTP responses | every variable bound from a `.json()` against the keys any `send()` can emit | none; the apparent misses were same-named DOM and `FormData` variables in other scopes |
+
+One candidate was examined and dismissed: `narrativeEvents` is exposed by the server and is not in the derived ledger, but the client imports `deriveNarrativeEvents` and computes it locally, so no surface reads it from the wrong origin.
+
+### Attacking the fix
+
+`fab69c2` makes the inbox render; it does not stop the class recurring. The next non-derivable field added to `publicState` and read off the derived ledger reproduces the defect exactly, with the same silent failure, because nothing enforces the boundary. The fix was at the symptom's layer, not the invariant's.
+
+The derived ledger is now returned behind a proxy that warns when a surface reads a known server-only field from it, naming the field and where it actually lives. Verified both ways in the browser: reintroducing the original defect produces the warning on load, and the corrected code produces none.
+
+This converts a class that fails invisibly into one that announces itself. It warns rather than throws, so a diagnostic can never take down a ledger.
+
+### Blast radius and severity
+
+Every organizer whose capture could not be posted, from the v5 integration in `67f7249` until `fab69c2` — the inbox was invisible to all of them, with no error anywhere. The code is not published as a library, so nothing downstream consumes it.
+
+This is a functional defect, not a security finding: no authority boundary was crossed, no balance was wrong, and the failure mode is a feature that cannot be reached. Anchoring it to a security advisory for severity would overstate what it is.

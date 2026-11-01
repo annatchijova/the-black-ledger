@@ -17,7 +17,24 @@ const ledgerCurrency = () => events?.find((event) => event.type === "SESSION_CRE
 const displayLocale = typeof navigator !== "undefined" && navigator.language ? navigator.language : "en-US";
 const money = (minor) => formatMoney(minor, ledgerCurrency(), displayLocale);
 const parseLedgerAmount = (value) => parseAmountToMinor(value, ledgerCurrency());
-const ledger = () => deriveLedger(events, { baseCurrency: ledgerCurrency() });
+// Fields the server holds outside the event log. The derived ledger is a pure
+// function of the events and can never produce them, but both are plain objects
+// with overlapping names, so reading one off the wrong origin yields undefined
+// and renders as an empty panel. That is how the reconciliation inbox shipped
+// invisible. Reading one here now says so out loud instead of rendering nothing.
+const SERVER_ONLY_STATE = new Set(["paymentReconciliations"]);
+
+const ledger = () => {
+  const derived = deriveLedger(events, { baseCurrency: ledgerCurrency() });
+  return new Proxy(derived, {
+    get(target, key) {
+      if (typeof key === "string" && SERVER_ONLY_STATE.has(key) && !(key in target)) {
+        console.warn(`[ledger] "${key}" is not derivable from the event log; read it from getServerState() instead. Rendering it from the derived ledger silently produces nothing.`);
+      }
+      return target[key];
+    }
+  });
+};
 const memberName = (id) => ledger().members.find((m) => m.id === id)?.name ?? "Unknown participant";
 
 try { events = await loadLedger(); }
