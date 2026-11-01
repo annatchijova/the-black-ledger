@@ -260,3 +260,19 @@ This converts a class that fails invisibly into one that announces itself. It wa
 Every organizer whose capture could not be posted, from the v5 integration in `67f7249` until `fab69c2` — the inbox was invisible to all of them, with no error anywhere. The code is not published as a library, so nothing downstream consumes it.
 
 This is a functional defect, not a security finding: no authority boundary was crossed, no balance was wrong, and the failure mode is a feature that cannot be reached. Anchoring it to a security advisory for severity would overstate what it is.
+
+---
+
+## Narrow-viewport review — 2026-11-01
+
+The last of the four visual checks the integration notes left unperformed. Earlier attempts failed because the window manager ignores programmatic resizing; rendering the app inside a 390px iframe gives a genuine mobile viewport, since media queries evaluate against the iframe rather than the window.
+
+**Checked:** the ledger, expenses, history, participants, verdict and settlement pages at 390px. No page scrolled horizontally, and no element overflowed its container on any of them.
+
+**Found and fixed.** The reconciliation row kept its three-column desktop layout at 390px. The row is a flex container whose text column carries `min-width: 0`, so it shrank instead of wrapping while the button held its width: 93px for the whole record against 161px for the button, leaving the reason wrapped into eight lines beside a large empty space. The text column now takes the full row and the button moves to its own line below it, which brought the text from 93px to 265px. The same squeeze applied to the one other row type that carries a button, so the rule covers both rather than only the row where it was spotted.
+
+Separately, the ledger-export control was a 16px-tall touch target, under the 24px minimum. It now has a 44px target on small screens with no change to how it reads.
+
+**Not a defect:** the participant checkboxes measure 13px but sit inside labels with a 67 by 37px target, and the remaining buttons are 37px — above the minimum, under the 44px comfort guideline. Recorded rather than changed.
+
+Desktop layout verified unchanged at 1920px after the fix.
