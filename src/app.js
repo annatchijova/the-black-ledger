@@ -115,6 +115,7 @@ function membersPage(current) {
     <section class="feature-card mirror-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/broken-mirror.png" alt=""></div><div><div class="eyebrow">A NAME ENTERED BECOMES A WITNESS</div><h2>Who shared the account?</h2><p>Add the people whose spending and contributions belong in this ledger. This local level is operated by one organizer.</p></div></section>
     ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="member-form"><label for="member-name">Participant name</label><div class="input-row"><input id="member-name" name="name" maxlength="48" placeholder="e.g. Alex" required autocomplete="off"><button class="button button-gold" type="submit">Add to the mirror <span>↗</span></button></div><small>Up to 100 names. Entries are saved to the shared event log.</small></form>` : ""}
     ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="invite-form"><label for="invite-name">Invite someone to this ledger</label><div class="input-row"><input id="invite-name" name="name" maxlength="80" placeholder="Participant name" required><select name="role"><option value="member">Participant</option><option value="witness">Read-only witness</option></select><button class="button button-quiet" type="submit">Create invite link</button></div><output id="invite-link" aria-live="polite"></output></form>` : ""}
+    ${!current.archived ? `<form class="form-panel inline-form" id="join-code-form"><label for="join-code">Join another ledger with a code</label><div class="input-row"><input id="join-code" name="code" maxlength="20" autocomplete="off" spellcheck="false" placeholder="ABCD-2345"><button class="button button-quiet" type="submit">Use code</button></div><p class="field-hint">Someone who already keeps a ledger can read you their code. This leaves the ledger you are looking at and opens theirs.</p><output id="join-code-result" aria-live="polite"></output></form>` : ""}
     ${!current.archived && canAdmin && activeMembers.length ? `<form class="form-panel inline-form" id="group-form"><label for="group-name">Create a temporary subgroup</label><div class="input-row"><input id="group-name" name="name" maxlength="80" placeholder="e.g. Museum afternoon" required><button class="button button-quiet" type="submit">Create subgroup</button></div><fieldset class="beneficiary-fieldset"><legend>Participants</legend><div class="check-grid">${activeMembers.map((member) => `<label class="check-row"><input type="checkbox" name="groupMember" value="${h(member.id)}"><span>${h(member.name)}</span></label>`).join("")}</div></fieldset></form>` : ""}
     ${!current.archived && canAdmin ? `<form class="form-panel agreement-form" id="agreement-form"><div class="eyebrow">AGREED BEFORE THE JOURNEY</div><h2>Record shared expectations</h2><p>Each statement is saved with its timestamp. Later updates add a new record to the history.</p>${agreementFields.map(([category, label, placeholder]) => `<label>${label}<textarea name="${category}" maxlength="500" rows="2" placeholder="${placeholder}">${h(agreement.get(category)?.text ?? "")}</textarea></label>`).join("")}<output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Save agreement record</button></form>` : ""}
     ${agreement.size ? `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">CURRENT AGREEMENT</div><h2>Rules of this journey</h2></div><span class="count">${agreement.size} topics</span></div><div class="agreement-list">${agreementFields.filter(([category]) => agreement.has(category)).map(([category, label]) => `<article><b>${label}</b><p>${h(agreement.get(category).text)}</p><small>Recorded ${eventDate(agreement.get(category).at)}</small></article>`).join("")}</div></section>` : ""}
@@ -367,9 +368,33 @@ function bindPage(current) {
       if (!response.ok) throw new Error(result.error ?? "Could not create invite.");
       const link = `${location.origin}${result.invitePath}`;
       try { await navigator.clipboard?.writeText(link); } catch { /* The visible invite path remains available to copy manually. */ }
-      events = await loadLedger(); render(); document.querySelector("#invite-link").textContent = link;
-      showToast("Invite link created. Share it privately with the participant.");
+      events = await loadLedger(); render();
+      const output = document.querySelector("#invite-link");
+      // The code is shown once. It is stored hashed, so it cannot be read back
+      // out later and a lost one is replaced by inviting again.
+      if (output) output.textContent = result.joinCode ? `Code ${result.joinCode} — say it out loud, or send the link: ${link}` : link;
+      showToast(result.joinCode ? `Join code ${result.joinCode}. It works once, for 24 hours.` : "Invite link created. Share it privately with the participant.");
     } catch (error) { showToast(error.message); }
+  });
+
+  document.querySelector("#join-code-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const field = event.target.elements.code;
+    const result = document.querySelector("#join-code-result");
+    const say = (text) => { if (result) { result.hidden = false; result.textContent = text; } };
+    try {
+      const response = await fetch("/api/join", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: field.value }) });
+      const claim = await response.json();
+      if (!response.ok) throw new Error(claim.error ?? "That code could not be used.");
+      localStorage.setItem("the-black-ledger.session.v1", claim.sessionId);
+      localStorage.setItem("the-black-ledger.access.v1", claim.accessToken);
+      field.value = "";
+      say("");
+      events = await loadLedger();
+      route = "home";
+      render();
+      showToast(claim.role === "witness" ? "You joined as a read-only witness." : "You joined the ledger.");
+    } catch (error) { say(error.message); }
   });
 
   document.querySelector("#analyze-receipt")?.addEventListener("click", async () => {

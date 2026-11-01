@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS paypal_order_requests (session_id TEXT NOT NULL REFER
 CREATE TABLE IF NOT EXISTS paypal_reconciliations (capture_id TEXT PRIMARY KEY, order_id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL REFERENCES sessions(id), from_member_id TEXT NOT NULL, to_member_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, occurred_at TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL, resolved_at TEXT);
 CREATE TABLE IF NOT EXISTS session_patterns (session_id TEXT PRIMARY KEY REFERENCES sessions(id), pattern TEXT NOT NULL, recorded_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS analysis_usage (scope_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, request_count INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS invite_codes (code_hash TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), role TEXT NOT NULL, member_id TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, redeemed_at TEXT);
+CREATE TABLE IF NOT EXISTS join_attempts (scope_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, attempt_count INTEGER NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS evidence_session_digest ON evidence(session_id, sha256);
 `);
 
@@ -60,6 +62,44 @@ const sha = (value) => createHash("sha256").update(value).digest("hex");
 // address, so the ceiling degrades to a single shared allowance: terminate
 // closer to the client, or widen sourceLimit deliberately.
 const clientSource = (req) => req.socket?.remoteAddress ?? "unknown";
+
+// A short code is dictated aloud and typed by hand, so the alphabet drops the
+// characters people confuse (I, L, O, U) and reading maps the confusions back.
+// Eight characters over 32 symbols is about 40 bits: far too sparse to guess
+// under the attempt ceiling below, while staying short enough to say out loud.
+const CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const JOIN_CODE_TTL_MS = 24 * 60 * 60 * 1000;
+const JOIN_ATTEMPT_LIMIT = 20;
+
+function newJoinCode() {
+  const bytes = randomBytes(8);
+  // Rejection-free because 256 is a multiple of 32, so every symbol stays
+  // equally likely and the code keeps its full entropy.
+  const code = [...bytes].map((byte) => CODE_ALPHABET[byte % 32]).join("");
+  return `${code.slice(0, 4)}-${code.slice(4)}`;
+}
+
+const normalizeJoinCode = (value) => String(value ?? "").toUpperCase().replace(/[^0-9A-Z]/g, "").replaceAll("I", "1").replaceAll("L", "1").replaceAll("O", "0");
+
+// Counted before the code is looked at, so a wrong guess costs the same as a
+// right one and the ceiling cannot be sidestepped by only sending valid-looking
+// codes.
+function reserveJoinAttempt(sourceId, now = Date.now()) {
+  const windowStart = Math.floor(now / (60 * 60 * 1000)) * (60 * 60 * 1000);
+  const scope = `join:source:${sourceId}`;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("DELETE FROM join_attempts WHERE window_start < ?").run(windowStart);
+    const current = db.prepare("SELECT window_start, attempt_count FROM join_attempts WHERE scope_id = ?").get(scope);
+    if (current?.window_start === windowStart && current.attempt_count >= JOIN_ATTEMPT_LIMIT) {
+      throw Object.assign(new Error("Too many join attempts. Try again in the next hour."), { status: 429 });
+    }
+    db.prepare(`INSERT INTO join_attempts(scope_id, window_start, attempt_count) VALUES (?, ?, 1)
+      ON CONFLICT(scope_id) DO UPDATE SET window_start = excluded.window_start,
+      attempt_count = CASE WHEN join_attempts.window_start = excluded.window_start THEN join_attempts.attempt_count + 1 ELSE 1 END`).run(scope, windowStart);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+}
 
 // Overridable so the paid-analysis path can be exercised against a loopback
 // double. Without it the provider branch is unreachable in tests, which is how
@@ -216,6 +256,34 @@ function publicState(ledger, access = {}) {
 async function route(req, res) {
   const url = new URL(req.url, "http://localhost");
   if (req.method === "GET" && url.pathname === "/api/health") return send(res, 200, { ok: true, storage: "sqlite", apiVersion: 1 });
+  if (req.method === "POST" && url.pathname === "/api/join") {
+    const body = await readJson(req, 4_000);
+    reserveJoinAttempt(clientSource(req));
+    const code = normalizeJoinCode(body.code);
+    // One message for every failure. Distinguishing "expired" from "unknown"
+    // would tell someone probing codes when they had found a real one.
+    const refuse = () => send(res, 404, { error: "That join code is not valid. Ask the organizer for a new one." });
+    if (code.length !== 8) return refuse();
+    const invite = db.prepare("SELECT session_id, role, member_id, expires_at, redeemed_at FROM invite_codes WHERE code_hash = ?").get(sha(code));
+    if (!invite || invite.redeemed_at || Date.parse(invite.expires_at) <= Date.now()) return refuse();
+    const session = db.prepare("SELECT id FROM sessions WHERE id = ?").get(invite.session_id);
+    if (!session) return refuse();
+    // The code never stood for a credential; it is spent to mint one, so no
+    // bearer token has to be kept in readable form while it waits to be used.
+    const accessToken = randomBytes(32).toString("base64url");
+    const redeemedAt = new Date().toISOString();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const claimed = db.prepare("UPDATE invite_codes SET redeemed_at = ? WHERE code_hash = ? AND redeemed_at IS NULL").run(redeemedAt, sha(code));
+      // Losing this race means another request spent the code first, which is a
+      // different thing from the code being wrong. Both are refused, but the
+      // distinction belongs in the message a maintainer reads.
+      if (claimed.changes !== 1) throw Object.assign(new Error("That join code was already used."), { status: 409 });
+      db.prepare("INSERT INTO session_tokens(token_hash, session_id, role, member_id, created_at) VALUES (?, ?, ?, ?, ?)").run(sha(accessToken), invite.session_id, invite.role, invite.member_id, redeemedAt);
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    return send(res, 200, { sessionId: invite.session_id, accessToken, role: invite.role, memberId: invite.member_id });
+  }
   if (req.method === "POST" && url.pathname === "/api/sessions") {
     const body = await readJson(req, 16_000); const sessionId = body.sessionId ?? randomUUID().replaceAll("-", "");
     const accessToken = randomBytes(32).toString("base64url");
@@ -263,7 +331,12 @@ async function route(req, res) {
       const event = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "MEMBER_INVITED", memberId, name: body.name, role: body.role };
       const created = append(sessionId, event, `invite-${event.id}`);
       db.prepare("INSERT INTO session_tokens(token_hash, session_id, role, member_id, created_at) VALUES (?, ?, ?, ?, ?)").run(sha(token), sessionId, body.role, memberId, event.at);
-      return send(res, 201, { memberId, role: body.role, accessToken: token, invitePath: `/#join/${sessionId}/${token}`, event: created.event, state: created.state });
+      const joinCode = newJoinCode();
+      db.prepare("INSERT INTO invite_codes(code_hash, session_id, role, member_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(sha(normalizeJoinCode(joinCode)), sessionId, body.role, memberId, event.at, new Date(Date.now() + JOIN_CODE_TTL_MS).toISOString());
+      // Returned once, to the organizer who created it. It is stored hashed, so
+      // it cannot be read back out of the database or shown again later.
+      return send(res, 201, { memberId, role: body.role, accessToken: token, joinCode, joinCodeExpiresAt: new Date(Date.now() + JOIN_CODE_TTL_MS).toISOString(), invitePath: `/#join/${sessionId}/${token}`, event: created.event, state: created.state });
     }
     if (req.method === "POST" && resource === "carry-debt") {
       if (access.role !== "organizer") return send(res, 403, { error: "Only the organizer can carry obligations between sessions." });
