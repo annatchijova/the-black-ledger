@@ -186,3 +186,35 @@ The test was checked against the previous implementation and fails there with th
 
 - The browser was exercised for the first time in this session and found the organizer reconciliation inbox rendering nothing, fixed in `fab69c2`. Narrow-viewport layout remains unverified: programmatic resize is ignored by the window manager while the browser window is maximized.
 - The live PayPal Sandbox has still not been exercised. Every payment result in this document comes from a loopback double, so provider response shapes beyond those modelled remain unverified — including the premise of R2-1, that a provider can return a capture in a currency outside the supported table.
+
+---
+
+## Live PayPal Sandbox exercise — 2026-11-01
+
+**Base:** `main` @ `ad65842`
+**Scope:** The first end-to-end run of the payment path against the real PayPal Sandbox, rather than the loopback double every earlier result in this document came from.
+
+Order `10D056488K241574M`, capture `4SH52176MC5695524`, USD 5.00, sandbox business payee `W5TDJ2MZBBETL`.
+
+### Confirmed against the real provider
+
+| Property | Result |
+| --- | --- |
+| Client-credentials authentication | 200 |
+| Order creation, with the configured merchant as payee | 201, and `payee.merchant_id` in the capture matches the configured value |
+| Buyer approval and capture | `COMPLETED`, settlement posted, debtor balance cleared to 0 |
+| Capture idempotency | A repeated capture returned the recorded one with `alreadyRecorded`, one confirmation in the chain, no second charge |
+| Capture amount shape | `{"currency_code": "USD", "value": "5.00"}` — the two-decimal form the parser assumes |
+| Provider timestamp | `create_time` preserved verbatim into the event's `at` |
+
+The reconciliation inbox stayed empty, which is the correct outcome for a capture that matches its obligation.
+
+### Observed, and not represented in the ledger: the provider's fee
+
+The capture's `seller_receivable_breakdown` reports `gross_amount` 5.00, `paypal_fee` 0.57, `net_amount` 4.43. The ledger records the settlement at 5.00 and discharges the obligation, which is correct about the debt: the debtor paid what they owed. But the creditor receives 4.43, and nothing in the ledger carries the missing 0.57.
+
+This is a product question, not a defect — the system never claimed to track rail costs, and no balance is wrong. It is recorded here because a ledger whose stated purpose is that every debt leaves a trace currently leaves one real cost untraced, and because it is exactly the kind of thing only a live provider reveals. Deciding whether the fee belongs in the ledger, and whom it falls on, is a design decision rather than a bug fix.
+
+### Still unverified
+
+R2-1 rests on the premise that a provider can return a completed capture whose currency is outside the supported table, or whose precision exceeds it. This run observed one capture, in the normal shape, and so neither confirms nor refutes that premise. The remediation stands on its own as defensive handling of an input the code's own currency-mismatch guard already anticipated, but the triggering scenario remains a modelled assumption rather than an observed provider behaviour, and is labelled as such.
