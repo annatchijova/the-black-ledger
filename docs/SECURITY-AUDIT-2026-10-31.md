@@ -209,11 +209,13 @@ Order `10D056488K241574M`, capture `4SH52176MC5695524`, USD 5.00, sandbox busine
 
 The reconciliation inbox stayed empty, which is the correct outcome for a capture that matches its obligation.
 
-### Observed, and not represented in the ledger: the provider's fee
+### Observed: the provider's fee appears in the capture, not in the ledger
 
-The capture's `seller_receivable_breakdown` reports `gross_amount` 5.00, `paypal_fee` 0.57, `net_amount` 4.43. The ledger records the settlement at 5.00 and discharges the obligation, which is correct about the debt: the debtor paid what they owed. But the creditor receives 4.43, and nothing in the ledger carries the missing 0.57.
+The capture's `seller_receivable_breakdown` reports `gross_amount` 5.00, `paypal_fee` 0.57, `net_amount` 4.43. The ledger records the settlement at 5.00 and discharges the obligation.
 
-This is a product question, not a defect — the system never claimed to track rail costs, and no balance is wrong. It is recorded here because a ledger whose stated purpose is that every debt leaves a trace currently leaves one real cost untraced, and because it is exactly the kind of thing only a live provider reveals. Deciding whether the fee belongs in the ledger, and whom it falls on, is a design decision rather than a bug fix.
+That is correct, and is not a gap. The ledger's subject is obligations between the participants of a journey: the debtor owed 5.00 and paid 5.00, so the debt is settled. The fee is a cost between the creditor and PayPal, a counterparty who is not in the ledger, in the same way a wire fee would be. Recording it would introduce a non-participant into a record whose whole structure is participant-to-participant, and anyone choosing to settle through PayPal already knows PayPal charges.
+
+It is written down here only as part of the observed response shape, which earlier rounds could not see because the loopback double did not model it.
 
 ### Still unverified
 
