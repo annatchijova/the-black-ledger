@@ -157,3 +157,32 @@ The provider URL was hardcoded, so every test stopped at the unconfigured-key ch
 
 - An approval window that expires with no client retrying its idempotency key leaves the `SETTLEMENT_ASSERTED` claim counted against the obligation until a retry sweeps it. Fail-closed, but it blocks the PayPal rail for that pair for up to the TTL. Carried over from Round 2.
 - The organizer may create a checkout on behalf of any member, which permits repeatedly reserving another member's obligation. The organizer is already trusted with the whole ledger, so this is a threat-model assumption rather than a defect, but it is the shape that would matter if a non-organizer role ever gained that capability.
+
+---
+
+## Closure — the carried-over liveness gap
+
+**Base:** `main` @ `fcd1dd4`
+**Reproducible evidence:** `test/paypal-approval-expiry.test.js`
+
+Rounds 2 and 3 both recorded, without addressing it, that an approval window expiring with no client retrying its idempotency key left the `SETTLEMENT_ASSERTED` claim reserving the obligation. It is now confirmed and closed.
+
+**Epistemic level:** CONFIRMED BY INDUCTION. **Bucket:** software defect (availability). **Severity:** Low — no balance was ever wrong, and the refusal was fail-closed.
+
+**Deduction.** A claim is a ledger event, and events do not expire. The expiry that existed ran only inside the branch handling a repeated idempotency key, so a buyer who starts a checkout and never approves it blocks that debtor-creditor pair from the PayPal rail, and only a retry with the very same key — which nobody has a reason to send — clears it.
+
+**Induction.** Executed against `fcd1dd4`. A checkout was created and abandoned, its approval window backdated 24 hours, and a fresh checkout attempted under a new key:
+
+| | New checkout after the window died |
+| --- | --- |
+| Before | **409**, `availableMinor: 0`, while the debtor genuinely owed 500 |
+| After | **201**, a replacement order |
+
+**Remediation applied.** Stale approvals are swept before the obligation is measured, writing the same expiry event the retry path writes under the same idempotency key, so the two paths cannot double-record an expiry. A live approval still reserves the obligation — verified as a negative control in the same run. The sweep is wrapped so that a failure warns at the boundary and leaves the request behaving exactly as it did before, rather than failing a checkout because an optional cleanup could not run.
+
+The test was checked against the previous implementation and fails there with the 409 above.
+
+### Still open after this round
+
+- The browser was exercised for the first time in this session and found the organizer reconciliation inbox rendering nothing, fixed in `fab69c2`. Narrow-viewport layout remains unverified: programmatic resize is ignored by the window manager while the browser window is maximized.
+- The live PayPal Sandbox has still not been exercised. Every payment result in this document comes from a loopback double, so provider response shapes beyond those modelled remain unverified — including the premise of R2-1, that a provider can return a capture in a currency outside the supported table.

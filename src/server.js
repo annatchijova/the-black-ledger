@@ -138,6 +138,29 @@ function append(sessionId, event, requestId, { trustedProvider = false } = {}) {
   return response;
 }
 
+// An approval window that nobody returns to still counts its claim against the
+// obligation, because the claim is a ledger event and events do not expire. The
+// existing expiry only ran when a client retried the same idempotency key, so an
+// abandoned checkout blocked the rail for that pair until someone happened to
+// reuse that exact key. Sweeping on the next checkout closes that, and the
+// appended event is the same one the retry path writes, under the same
+// idempotency key, so the two paths cannot double-record an expiry.
+function expireStaleApprovals(sessionId) {
+  const cutoff = Date.now() - PAYPAL_APPROVAL_TTL_MS;
+  const stale = db.prepare("SELECT request_id, order_id, created_at FROM paypal_order_requests WHERE session_id = ? AND status IN ('creating', 'created') AND order_id IS NOT NULL").all(sessionId)
+    .filter((row) => Date.parse(row.created_at) < cutoff);
+  for (const row of stale) {
+    const order = db.prepare("SELECT status, created_at FROM paypal_orders WHERE order_id = ? AND session_id = ?").get(row.order_id, sessionId);
+    if (order?.status !== "created") continue;
+    const expiredAt = new Date(Date.parse(row.created_at) + PAYPAL_APPROVAL_TTL_MS).toISOString();
+    const expired = { id: `paypal_${row.order_id}_expired`, at: expiredAt, type: "SETTLEMENT_STATUS_RECORDED", settlementId: `paypal_${row.order_id}`, status: "denied", reason: "PayPal approval window expired without capture." };
+    append(sessionId, expired, `paypal-expire-${row.order_id}`);
+    db.prepare("UPDATE paypal_orders SET status = 'expired' WHERE order_id = ? AND session_id = ?").run(row.order_id, sessionId);
+    db.prepare("UPDATE paypal_order_requests SET status = 'expired' WHERE session_id = ? AND request_id = ?").run(sessionId, row.request_id);
+  }
+  return stale.length;
+}
+
 function completeOrderRows(sessionId, orderId, captureId) {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -432,6 +455,8 @@ async function route(req, res) {
           if (priorOrder) return send(res, 409, { error: "This PayPal order is terminal. Start a new checkout with a new idempotency key." });
         }
       }
+      try { expireStaleApprovals(sessionId); }
+      catch (error) { console.warn(`[ledger] Could not expire stale PayPal approvals for session ${sessionId}: ${error.message}`); }
       const ledger = deriveLedger(getEvents(sessionId).events, { baseCurrency: session.base_currency });
       const due = ledger.outstanding.find((item) => item.debtorId === body.fromMemberId && item.creditorId === body.toMemberId)?.amountMinor ?? 0;
       const claimed = ledger.pendingClaims.find((item) => item.fromMemberId === body.fromMemberId && item.toMemberId === body.toMemberId)?.amountMinor ?? 0;
