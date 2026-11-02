@@ -170,7 +170,7 @@ function recurringSection(current) {
   const createForm = canManage ? `<form class="form-panel" id="recurring-rule-form"><div class="eyebrow">REPEATING OBLIGATION</div><h2>Approve a recurring expense</h2><div class="field-grid"><label>Description<input name="description" maxlength="180" required></label><label>Expected amount · ${h(ledgerCurrency())}<input name="amount" inputmode="decimal" required></label><label>Cadence<input name="cadence" maxlength="40" placeholder="Monthly" required></label></div><fieldset class="beneficiary-fieldset"><legend>Default allocation</legend><div class="check-grid">${participantChecks}</div></fieldset><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Approve recurring rule</button></form>` : "";
   const rules = current.recurringRules.map((rule) => {
     const periods = current.recurringPeriods.filter((entry) => entry.startsWith(`${rule.ruleId}:`)).map((entry) => entry.slice(rule.ruleId.length + 1));
-    const recorded = periods.length ? periods.map((period) => `<span class="count">${h(period)}</span>`).join(" ") : "No periods recorded";
+    const recorded = periods.length ? periods.map((period) => `<span class="count">${h(period)}</span>`).join(" ") : t("msg.no.periods.recorded");
     const generateForm = canManage && activePayers ? `<form class="recurring-instance-form" data-rule-id="${h(rule.ruleId)}"><label>Period key<input name="periodKey" maxlength="40" placeholder="2026-10" required></label><label>Paid by<select name="payerMemberId" required>${activePayers}</select></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record this period</button></form>` : "";
     return `<article class="recurring-row"><div><b>${h(rule.description)}</b><small>${h(rule.cadence)} · ${rule.allocations.length} allocated participants · ${money(rule.amountMinor)}</small></div><div class="recurring-periods"><small>Recorded periods:</small> ${recorded}</div>${generateForm}</article>`;
   }).join("");
@@ -179,12 +179,12 @@ function recurringSection(current) {
 
 function budgetSection(current) {
   const canManage = getAccessContext().role === "organizer" && !current.archived;
-  const form = canManage ? `<form class="form-panel" id="budget-form"><div class="eyebrow">AGREED ALLOWANCE</div><h2>Set a travel budget</h2><div class="field-grid"><label>Budget label<input name="period" maxlength="80" placeholder="Lisbon weekend" required></label><label>Limit · ${h(ledgerCurrency())}<input name="amount" inputmode="decimal" required></label></div><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record budget</button><p class="field-hint">Each new budget starts a fresh tracking period. The ledger keeps earlier limits in its event history.</p></form>` : "";
+  const form = canManage ? `<form class="form-panel" id="budget-form"><div class="eyebrow">AGREED ALLOWANCE</div><h2>Set a travel budget</h2><div class="field-grid"><label>Budget label<input name="period" maxlength="80" placeholder=t("msg.lisbon.weekend") required></label><label>Limit · ${h(ledgerCurrency())}<input name="amount" inputmode="decimal" required></label></div><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record budget</button><p class="field-hint">Each new budget starts a fresh tracking period. The ledger keeps earlier limits in its event history.</p></form>` : "";
   const entries = current.budgets.map((budget, index) => {
     const spentMinor = current.expenses.filter((expense) => expense.status !== "unassigned" && Date.parse(expense.at) >= Date.parse(budget.at)).reduce((sum, expense) => sum + expense.baseAmountMinor, 0);
     const active = index === current.budgets.length - 1;
     const over = spentMinor >= budget.amountMinor;
-    return `<article class="budget-row"><div><b>${h(budget.period)}</b><small>${active ? "Current budget" : "Previous limit"} · Set ${eventDate(budget.at)} · ${over ? "Limit reached" : "Within limit"}</small></div><progress max="${budget.amountMinor}" value="${Math.min(spentMinor, budget.amountMinor)}" aria-label="${h(budget.period)} budget usage"></progress><strong>${money(spentMinor)} / ${money(budget.amountMinor)}</strong></article>`;
+    return `<article class="budget-row"><div><b>${h(budget.period)}</b><small>${active ? t("msg.current.budget") : t("msg.previous.limit")} · Set ${eventDate(budget.at)} · ${over ? t("msg.limit.reached") : "Within limit"}</small></div><progress max="${budget.amountMinor}" value="${Math.min(spentMinor, budget.amountMinor)}" aria-label="${h(budget.period)} budget usage"></progress><strong>${money(spentMinor)} / ${money(budget.amountMinor)}</strong></article>`;
   }).join("");
   return `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE BLEEDING ALLOWANCE</div><h2>Travel budgets</h2></div><span class="count">${current.budgets.length} records</span></div>${form}${entries ? `<div class="budget-list">${entries}</div>` : `<p class="empty-inline">No budget has been agreed for this journey.</p>`}</section>`;
 }
@@ -198,7 +198,7 @@ function giftSection(current) {
   const payers = activeMembers.filter((member) => member.id !== defaultRecipient).map((member) => `<option value="${h(member.id)}">${h(member.name)}</option>`).join("");
   const contributors = activeMembers.map((member) => `<label class="check-row"><input type="checkbox" name="giftContributor" value="${h(member.id)}" ${member.id === defaultRecipient ? "" : "checked"}><span>${h(member.name)}</span></label>`).join("");
   const form = canCreate ? `<form class="form-panel" id="gift-form"><div class="eyebrow">THE PACT OF SILENCE</div><h2>Record a surprise gift</h2><div class="field-grid"><label>Private description<input name="description" maxlength="240" required></label><label>Amount <span class="field-hint">${h(ledgerCurrency())}</span><input name="amount" inputmode="decimal" required></label><label>Recipient<select name="recipient" id="gift-recipient" required>${recipients}</select></label><label>Who paid upfront?<select name="payer" id="gift-payer" required>${payers}</select></label></div><fieldset class="beneficiary-fieldset"><legend>Who contributed? The recipient cannot be included.</legend><div class="check-grid">${contributors}</div></fieldset><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record privately</button><p class="field-hint">The recipient sees a confidential entry; other ledger participants can review its description and contributions.</p></form>` : "";
-  return `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PACT OF SILENCE</div><h2>Surprise gifts</h2></div><span class="count">${current.gifts.length} records</span></div>${form}${!current.gifts.length ? `<p class="empty-inline">No surprise gifts have been recorded.</p>` : `<div class="member-list">${current.gifts.map((gift) => `<article class="member-row"><span class="avatar">✳</span><span class="member-name"><b>${access.memberId === gift.recipientMemberId ? "Confidential surprise gift" : h(gift.privateDescription)}</b><small>For ${h(current.members.find((member) => member.id === gift.recipientMemberId)?.name ?? t("member.unknown"))} · ${gift.contributions.length} contributor${gift.contributions.length === 1 ? "" : "s"}</small></span><strong>${money(gift.amountMinor)}</strong></article>`).join("")}</div>`}</section>`;
+  return `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PACT OF SILENCE</div><h2>Surprise gifts</h2></div><span class="count">${current.gifts.length} records</span></div>${form}${!current.gifts.length ? `<p class="empty-inline">No surprise gifts have been recorded.</p>` : `<div class="member-list">${current.gifts.map((gift) => `<article class="member-row"><span class="avatar">✳</span><span class="member-name"><b>${access.memberId === gift.recipientMemberId ? t("msg.confidential.surprise.gift") : h(gift.privateDescription)}</b><small>For ${h(current.members.find((member) => member.id === gift.recipientMemberId)?.name ?? t("member.unknown"))} · ${gift.contributions.length} contributor${gift.contributions.length === 1 ? "" : "s"}</small></span><strong>${money(gift.amountMinor)}</strong></article>`).join("")}</div>`}</section>`;
 }
 
 function commitmentSection(current) {
@@ -223,7 +223,7 @@ function commitmentSection(current) {
 function allocateWeighted(totalMinor, rows) {
   const weights = rows.map((row) => BigInt(row.baseMinor ?? row.amountMinor ?? row.cents));
   const weightTotal = weights.reduce((sum, value) => sum + value, 0n);
-  if (weightTotal <= 0n) throw new Error("The commitment has no positive participant shares to allocate.");
+  if (weightTotal <= 0n) throw new Error(t("msg.the.commitment.has.no"));
   const portions = weights.map((weight, index) => {
     const numerator = BigInt(totalMinor) * weight;
     return { memberId: rows[index].memberId, amount: numerator / weightTotal, remainder: numerator % weightTotal, index };
@@ -239,11 +239,11 @@ function allocateWeighted(totalMinor, rows) {
 
 function decimalRateToRatio(value) {
   const match = /^(0|[1-9]\d{0,11})(?:\.(\d{1,12}))?$/.exec(String(value ?? "").trim());
-  if (!match) throw new Error("Enter a positive exchange rate with at most 12 decimal places.");
+  if (!match) throw new Error(t("msg.enter.a.positive.exchange"));
   const fraction = match[2] ?? "";
   let numerator = BigInt(`${match[1]}${fraction}`);
   let denominator = 10n ** BigInt(fraction.length);
-  if (numerator <= 0n) throw new Error("Exchange rate must be greater than zero.");
+  if (numerator <= 0n) throw new Error(t("msg.exchange.rate.must.be"));
   const gcd = (a, b) => b === 0n ? a : gcd(b, a % b);
   const divisor = gcd(numerator, denominator);
   numerator /= divisor;
@@ -260,11 +260,11 @@ function expenseCurrencyDetails(data) {
   const feeMinor = feeText ? parseLedgerAmount(feeText) : 0;
   const ratio = decimalRateToRatio(data.get("fxRate"));
   const observedAt = new Date(String(data.get("fxObservedAt")));
-  if (!Number.isFinite(observedAt.getTime())) throw new Error("Enter when this exchange rate was observed.");
+  if (!Number.isFinite(observedAt.getTime())) throw new Error(t("msg.enter.when.this.exchange"));
   const source = String(data.get("fxSource") ?? "").trim();
-  if (!source) throw new Error("Enter the source of the exchange rate.");
+  if (!source) throw new Error(t("msg.enter.the.source.of"));
   const feePayerMemberId = String(data.get("fxFeePayer") ?? "");
-  if (feeMinor > 0 && !feePayerMemberId) throw new Error("Choose who paid the conversion fee.");
+  if (feeMinor > 0 && !feePayerMemberId) throw new Error(t("msg.choose.who.paid.the"));
   return { currency, amountMinor, baseAmountMinor, fx: { sourceCurrency: currency, targetCurrency: ledgerCurrency(), ...ratio, source, observedAt: observedAt.toISOString(), feeMinor, ...(feeMinor ? { feePayerMemberId } : {}) } };
 }
 
@@ -288,11 +288,11 @@ function expenseReview(expense, current) {
   const ownConfirmation = confirmations.find((item) => item.memberId === access.memberId);
   const openOwnDispute = discrepancies.find((item) => item.raisedByMemberId === access.memberId && !item.resolution);
   const canAct = assigned && !current.archived;
-  const reviewSummary = confirmations.length ? confirmations.map((item) => `${h(current.members.find((member) => member.id === item.memberId)?.name ?? t("member.unknown"))}: ${h(item.decision)}`).join(" · ") : "No participant has confirmed a share yet.";
+  const reviewSummary = confirmations.length ? confirmations.map((item) => `${h(current.members.find((member) => member.id === item.memberId)?.name ?? t("member.unknown"))}: ${h(item.decision)}`).join(" · ") : t("msg.no.participant.has.confirmed");
   const confirmationControl = canAct ? ownConfirmation?.decision === "accepted" ? `<span class="status-pill open">Your share is confirmed</span>` : `<button class="button button-quiet expense-confirm" type="button" data-expense-id="${h(expense.id)}">Confirm my share</button>` : "";
   const disputeControl = canAct && !openOwnDispute ? `<details class="expense-dispute"><summary>Report a discrepancy</summary><form class="discrepancy-form" data-expense-id="${h(expense.id)}"><label>What does not match?<textarea name="claim" maxlength="500" required></textarea></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record discrepancy</button></form></details>` : openOwnDispute ? `<p class="dispute-note">Your discrepancy is awaiting resolution.</p>` : "";
   const disputeRows = discrepancies.map((item) => `<div class="dispute-note"><b>${h(current.members.find((member) => member.id === item.raisedByMemberId)?.name ?? t("member.unknown"))} reported:</b> ${h(item.claim)}${item.resolution ? `<br><b>Resolution:</b> ${h(item.resolution)}` : access.role === "organizer" && !current.archived ? `<form class="resolution-form" data-discrepancy-id="${h(item.discrepancyId)}"><label>Resolution<textarea name="resolution" maxlength="500" required></textarea></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Resolve discrepancy</button></form>` : "<br><span>Awaiting organizer review.</span>"}</div>`).join("");
-  return `<section class="expense-review" aria-label="Participant review for ${h(expense.description)}"><p><b>Share review:</b> ${reviewSummary}</p>${confirmationControl}${disputeControl}${disputeRows}</section>`;
+  return `<section class="expense-review" aria-label=t("msg.participant.review.for", { what: h(expense.description) })><p><b>Share review:</b> ${reviewSummary}</p>${confirmationControl}${disputeControl}${disputeRows}</section>`;
 }
 
 function eventDescription(event) {
@@ -365,8 +365,8 @@ function bindPage(current) {
       const sessionId = localStorage.getItem("the-black-ledger.session.v1");
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/payments/${encodeURIComponent(button.dataset.orderId)}/reconcile`, { method: "POST", headers: { authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` } });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Reconciliation could not be completed.");
-      events = await loadLedger(); render(); showToast("Captured payment reconciled without another provider charge.");
+      if (!response.ok) throw new Error(result.error ?? t("msg.reconciliation.could.not.be"));
+      events = await loadLedger(); render(); showToast(t("msg.captured.payment.reconciled.without"));
     } catch (error) { showToast(error.message); button.disabled = false; }
   }));
   document.querySelector("#scenario-form")?.addEventListener("submit", async (event) => {
@@ -377,7 +377,7 @@ function bindPage(current) {
       const sessionId = localStorage.getItem("the-black-ledger.session.v1");
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/analysis/scenario`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` }, body: JSON.stringify({ prompt }) });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Scenario simulation failed.");
+      if (!response.ok) throw new Error(data.error ?? t("msg.scenario.simulation.failed"));
       resultNode.hidden = false; resultNode.textContent = JSON.stringify(data, null, 2);
     } catch (error) { resultNode.hidden = false; resultNode.textContent = error.message; }
   });
@@ -389,7 +389,7 @@ function bindPage(current) {
       const sessionId = localStorage.getItem("the-black-ledger.session.v1");
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/invitations`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` }, body: JSON.stringify({ name: data.get("name"), role: data.get("role") }) });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Could not create invite.");
+      if (!response.ok) throw new Error(result.error ?? t("msg.could.not.create.invite"));
       const link = `${location.origin}${result.invitePath}`;
       try { await navigator.clipboard?.writeText(link); } catch { /* The visible invite path remains available to copy manually. */ }
       events = await loadLedger(); render();
@@ -397,7 +397,7 @@ function bindPage(current) {
       // The code is shown once. It is stored hashed, so it cannot be read back
       // out later and a lost one is replaced by inviting again.
       if (output) output.textContent = result.joinCode ? `Code ${result.joinCode} — say it out loud, or send the link: ${link}` : link;
-      showToast(result.joinCode ? `Join code ${result.joinCode}. It works once, for 24 hours.` : "Invite link created. Share it privately with the participant.");
+      showToast(result.joinCode ? `Join code ${result.joinCode}. It works once, for 24 hours.` : t("msg.invite.link.created.share"));
     } catch (error) { showToast(error.message); }
   });
 
@@ -409,7 +409,7 @@ function bindPage(current) {
     try {
       const response = await fetch("/api/join", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: field.value }) });
       const claim = await response.json();
-      if (!response.ok) throw new Error(claim.error ?? "That code could not be used.");
+      if (!response.ok) throw new Error(claim.error ?? t("msg.that.code.could.not"));
       localStorage.setItem("the-black-ledger.session.v1", claim.sessionId);
       localStorage.setItem("the-black-ledger.access.v1", claim.accessToken);
       field.value = "";
@@ -417,7 +417,7 @@ function bindPage(current) {
       events = await loadLedger();
       route = "home";
       render();
-      showToast(claim.role === "witness" ? "You joined as a read-only witness." : "You joined the ledger.");
+      showToast(claim.role === "witness" ? t("msg.you.joined.as.a") : t("msg.you.joined.the.ledger"));
     } catch (error) { say(error.message); }
   });
 
@@ -433,9 +433,9 @@ function bindPage(current) {
       element.textContent = text;
     };
     try {
-      if (!file || file.size > 8_000_000) throw new Error("Choose an image no larger than 8 MB.");
-      if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(file.type)) throw new Error("Choose a JPEG, PNG, or WebP image.");
-      output("Attaching photo…");
+      if (!file || file.size > 8_000_000) throw new Error(t("msg.choose.an.image.no"));
+      if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(file.type)) throw new Error(t("msg.choose.a.jpeg.png"));
+      output(t("msg.attaching.photo"));
       const bytes = new Uint8Array(await file.arrayBuffer());
       let binary = "";
       for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
@@ -449,12 +449,12 @@ function bindPage(current) {
       const note = document.querySelector("#receipt-note")?.value?.trim();
       const evidenceResponse = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/evidence`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ mediaType: file.type, dataBase64, ...(note ? { note } : {}) }) });
       const evidence = await evidenceResponse.json();
-      if (!evidenceResponse.ok) throw new Error(evidence.error ?? "Could not attach the photo.");
+      if (!evidenceResponse.ok) throw new Error(evidence.error ?? t("msg.could.not.attach.the"));
       if (!events.some((item) => item.id === evidence.event.id)) events = [...events, evidence.event];
       if (!pendingEvidenceIds.includes(evidence.id)) pendingEvidenceIds.push(evidence.id);
       render();
 
-      output("Photo attached. Reading it\u2026");
+      output(t("msg.photo.attached.reading"));
       let proposal = null; let readerMessage = "";
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/analysis/receipt`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ mediaType: file.type, dataBase64 }) });
@@ -465,7 +465,7 @@ function bindPage(current) {
 
       if (!proposal) {
         output(`Photo attached and recorded in the history.\n\nIt was not read automatically (${readerMessage}), so type the description and amount yourself. Leave the amount empty if this is only a reference.`);
-        showToast("Photo attached. Enter the details by hand.");
+        showToast(t("msg.photo.attached.enter.the"));
         return;
       }
       output(JSON.stringify(proposal, null, 2));
@@ -477,14 +477,14 @@ function bindPage(current) {
       }
       if (form && proposal.merchant) form.elements.description.value = proposal.merchant;
       if (form && proposal.total) form.elements.amount.value = proposal.total;
-      showToast("Photo attached and a proposal is ready. Review each value before recording.");
+      showToast(t("msg.photo.attached.and.a"));
     } catch (error) { output(error.message); }
   });
 
   document.querySelector("#member-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const name = new FormData(event.currentTarget).get("name").trim();
-    if (!name || current.members.length >= 100) return showToast("Enter a name; the ledger supports up to 100 participants.");
+    if (!name || current.members.length >= 100) return showToast(t("msg.enter.a.name.the"));
     commit("MEMBER_ADDED", { memberId: crypto.randomUUID(), name }, `${name} entered the mirror.`);
   });
 
@@ -498,7 +498,7 @@ function bindPage(current) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const memberIds = data.getAll("groupMember");
-    if (!memberIds.length) return showToast("Choose at least one participant for the subgroup.");
+    if (!memberIds.length) return showToast(t("msg.choose.at.least.one"));
     const name = String(data.get("name")).trim();
     commit("GROUP_CREATED", { groupId: crypto.randomUUID(), name, memberIds }, `Subgroup ${name} created.`);
   });
@@ -510,11 +510,11 @@ function bindPage(current) {
       const data = new FormData(form);
       const amountMinor = parseLedgerAmount(data.get("amount"));
       const memberIds = data.getAll("commitmentMember");
-      if (!memberIds.length) throw new Error("Select at least one participant who shares this commitment.");
+      if (!memberIds.length) throw new Error(t("msg.select.at.least.one.participant.who"));
       const base = Math.floor(amountMinor / memberIds.length);
       let remainder = amountMinor - base * memberIds.length;
       const allocations = memberIds.map((memberId) => ({ memberId, cents: base + (remainder-- > 0 ? 1 : 0) }));
-      commitFromForm(form, "COMMITMENT_RECORDED", { commitmentId: crypto.randomUUID(), description: String(data.get("description")).trim(), amountMinor, payerMemberId: data.get("payer"), allocations, refundability: data.get("refundability") }, "Commitment recorded; its final cost remains separate from expenses.");
+      commitFromForm(form, "COMMITMENT_RECORDED", { commitmentId: crypto.randomUUID(), description: String(data.get("description")).trim(), amountMinor, payerMemberId: data.get("payer"), allocations, refundability: data.get("refundability") }, t("msg.commitment.recorded.its.final"));
     } catch (error) {
       const output = event.currentTarget.querySelector("[data-action-error]");
       output.textContent = error.message;
@@ -544,12 +544,12 @@ function bindPage(current) {
       const payerMemberId = String(data.get("payer"));
       const memberIds = data.getAll("giftContributor");
       const amountMinor = parseLedgerAmount(data.get("amount"));
-      if (!memberIds.length) throw new Error("Select at least one gift contributor.");
-      if (memberIds.includes(recipientMemberId) || payerMemberId === recipientMemberId) throw new Error("The recipient cannot pay for or contribute to their own surprise gift.");
+      if (!memberIds.length) throw new Error(t("msg.select.at.least.one.gift"));
+      if (memberIds.includes(recipientMemberId) || payerMemberId === recipientMemberId) throw new Error(t("msg.the.recipient.cannot.pay"));
       const base = Math.floor(amountMinor / memberIds.length);
       let remainder = amountMinor - base * memberIds.length;
       const contributions = memberIds.map((memberId) => ({ memberId, cents: base + (remainder-- > 0 ? 1 : 0) }));
-      commitFromForm(giftForm, "SURPRISE_GIFT_RECORDED", { giftId: crypto.randomUUID(), recipientMemberId, payerMemberId, privateDescription: String(data.get("description")).trim(), amountMinor, contributions }, "Surprise gift recorded. Its recipient will see a confidential entry.");
+      commitFromForm(giftForm, "SURPRISE_GIFT_RECORDED", { giftId: crypto.randomUUID(), recipientMemberId, payerMemberId, privateDescription: String(data.get("description")).trim(), amountMinor, contributions }, t("msg.surprise.gift.recorded.its"));
     } catch (error) {
       const output = giftForm.querySelector("[data-action-error]");
       output.textContent = error.message;
@@ -564,8 +564,8 @@ function bindPage(current) {
     try {
       const amountMinor = parseLedgerAmount(data.get("amount"));
       const period = String(data.get("period")).trim();
-      if (!period) throw new Error("Name the trip or budget period.");
-      commitFromForm(budgetForm, "BUDGET_SET", { amountMinor, currency: ledgerCurrency(), period }, "Budget recorded. Future expenses will be measured against this limit.");
+      if (!period) throw new Error(t("msg.name.the.trip.or"));
+      commitFromForm(budgetForm, "BUDGET_SET", { amountMinor, currency: ledgerCurrency(), period }, t("msg.budget.recorded.future.expenses"));
     } catch (error) {
       const output = budgetForm.querySelector("[data-action-error]");
       output.textContent = error.message;
@@ -580,11 +580,11 @@ function bindPage(current) {
     const rules = ["shared_costs", "personal_costs", "tips", "cancellations", "payment_deadline"].map((category) => ({ category, text: String(data.get(category) ?? "").trim() })).filter((rule) => rule.text);
     if (!rules.length) {
       const output = agreementForm.querySelector("[data-action-error]");
-      output.textContent = "Add at least one agreement before saving.";
+      output.textContent = t("msg.add.at.least.one");
       output.hidden = false;
       return;
     }
-    commitFromForm(agreementForm, "SESSION_RULES_RECORDED", { sessionId: current.session.id, rules }, "Agreement recorded in the ledger history.");
+    commitFromForm(agreementForm, "SESSION_RULES_RECORDED", { sessionId: current.session.id, rules }, t("msg.agreement.recorded.in.the"));
   });
 
   const recurringRuleForm = document.querySelector("#recurring-rule-form");
@@ -594,11 +594,11 @@ function bindPage(current) {
       const data = new FormData(recurringRuleForm);
       const amountMinor = parseLedgerAmount(data.get("amount"));
       const memberIds = data.getAll("recurringMember");
-      if (!memberIds.length) throw new Error("Select at least one participant for the recurring allocation.");
+      if (!memberIds.length) throw new Error(t("msg.select.at.least.one.participant"));
       const base = Math.floor(amountMinor / memberIds.length);
       let remainder = amountMinor - base * memberIds.length;
       const allocations = memberIds.map((memberId) => ({ memberId, cents: base + (remainder-- > 0 ? 1 : 0) }));
-      commitFromForm(recurringRuleForm, "RECURRING_RULE_APPROVED", { ruleId: crypto.randomUUID(), description: String(data.get("description")).trim(), amountMinor, allocations, cadence: String(data.get("cadence")).trim() }, "Recurring rule approved. Each period still needs an explicit recorded expense.");
+      commitFromForm(recurringRuleForm, "RECURRING_RULE_APPROVED", { ruleId: crypto.randomUUID(), description: String(data.get("description")).trim(), amountMinor, allocations, cadence: String(data.get("cadence")).trim() }, t("msg.recurring.rule.approved.each"));
     } catch (error) {
       const output = recurringRuleForm.querySelector("[data-action-error]");
       output.textContent = error.message;
@@ -615,7 +615,7 @@ function bindPage(current) {
     const alreadyRecorded = current.recurringPeriods.includes(`${ruleId}:${periodKey}`);
     if (!rule || alreadyRecorded) {
       const output = form.querySelector("[data-action-error]");
-      output.textContent = alreadyRecorded ? "This rule already has an expense recorded for that period." : "This recurring rule is no longer available.";
+      output.textContent = alreadyRecorded ? t("msg.this.rule.already.has") : t("msg.this.recurring.rule.is");
       output.hidden = false;
       return;
     }
@@ -634,9 +634,9 @@ function bindPage(current) {
     try {
       const item = current.commitments.find((commitment) => commitment.commitmentId === form.dataset.commitmentId);
       const amountMinor = parseLedgerAmount(new FormData(form).get("amount"));
-      if (!item || amountMinor > Number(form.dataset.maxRefund)) throw new Error("Refund must be no greater than the remaining commitment amount.");
+      if (!item || amountMinor > Number(form.dataset.maxRefund)) throw new Error(t("msg.refund.must.be.no"));
       const allocations = allocateWeighted(amountMinor, item.allocations);
-      commitFromForm(form, "COMMITMENT_REFUND_RECORDED", { commitmentId: item.commitmentId, amountMinor, allocations, reason: "Refund recorded against the commitment." }, "Commitment refund recorded.");
+      commitFromForm(form, "COMMITMENT_REFUND_RECORDED", { commitmentId: item.commitmentId, amountMinor, allocations, reason: t("msg.refund.recorded.against.the") }, t("msg.commitment.refund.recorded"));
     } catch (error) {
       const output = form.querySelector("[data-action-error]");
       output.textContent = error.message;
@@ -650,14 +650,14 @@ function bindPage(current) {
     const outcome = button.dataset.outcome;
     const remaining = item.amountMinor - (item.refundedMinor ?? 0);
     const linkedExpense = current.expenses.find((expense) => expense.commitmentId === item.commitmentId && expense.status !== "unassigned");
-    if (!linkedExpense && outcome === "consumed" && remaining <= 0) return showToast("A fully refunded commitment can be cancelled, but has no remaining expense to consume.");
+    if (!linkedExpense && outcome === "consumed" && remaining <= 0) return showToast(t("msg.a.fully.refunded.commitment"));
     button.disabled = true;
     if (!linkedExpense && remaining > 0) {
       const allocations = allocateWeighted(remaining, item.allocations);
-      const recorded = await commit("EXPENSE_RECORDED", { expenseId: crypto.randomUUID(), description: item.description, payerId: item.payerMemberId, totalCents: remaining, allocations, commitmentId: item.commitmentId }, outcome === "consumed" ? "Final commitment cost recorded." : "Non-refundable cancellation cost recorded.");
+      const recorded = await commit("EXPENSE_RECORDED", { expenseId: crypto.randomUUID(), description: item.description, payerId: item.payerMemberId, totalCents: remaining, allocations, commitmentId: item.commitmentId }, outcome === "consumed" ? t("msg.final.commitment.cost.recorded") : t("msg.nonrefundable.cancellation.cost.recorded"));
       if (!recorded) return;
     }
-    commit("COMMITMENT_UPDATED", { commitmentId: item.commitmentId, status: outcome, reason: outcome === "consumed" ? "Commitment cost was recorded as an expense." : "Commitment was cancelled; any remaining cost stays in the ledger." }, outcome === "consumed" ? "Commitment marked as used." : "Commitment cancelled with its remaining cost preserved.");
+    commit("COMMITMENT_UPDATED", { commitmentId: item.commitmentId, status: outcome, reason: outcome === "consumed" ? t("msg.commitment.cost.was.recorded") : t("msg.commitment.was.cancelled.any") }, outcome === "consumed" ? t("msg.commitment.marked.as.used") : t("msg.commitment.cancelled.with.its"));
   }));
 
   const expenseForm = document.querySelector("#expense-form");
@@ -703,44 +703,44 @@ function bindPage(current) {
       const totalMinor = details.baseAmountMinor;
       const payerId = data.get("payer");
       if (payerId === "unassigned") {
-        const saved = await commit("EXPENSE_UNASSIGNED", { description: String(data.get("description")).trim(), amountMinor: details.amountMinor, currency: details.currency, baseAmountMinor: details.baseAmountMinor, totalCents: details.baseAmountMinor, fx: details.fx, allocations: [], evidenceIds: [...pendingEvidenceIds] }, "Charge recorded as unassigned. It will not affect balances until assigned.");
+        const saved = await commit("EXPENSE_UNASSIGNED", { description: String(data.get("description")).trim(), amountMinor: details.amountMinor, currency: details.currency, baseAmountMinor: details.baseAmountMinor, totalCents: details.baseAmountMinor, fx: details.fx, allocations: [], evidenceIds: [...pendingEvidenceIds] }, t("msg.charge.recorded.as.unassigned"));
         if (saved) pendingEvidenceIds = [];
         return;
       }
       const ids = data.getAll("beneficiary");
-      if (!ids.length) throw new Error("Select at least one beneficiary.");
+      if (!ids.length) throw new Error(t("msg.select.at.least.one"));
       let allocations;
       if (data.get("splitMode") === "custom") {
         allocations = ids.map((memberId) => ({ memberId, cents: parseLedgerAmount(data.get(`share-${memberId}`)) }));
-        if (allocations.reduce((sum, row) => sum + row.cents, 0) !== totalMinor) throw new Error("Custom shares must sum exactly to the ledger total.");
+        if (allocations.reduce((sum, row) => sum + row.cents, 0) !== totalMinor) throw new Error(t("msg.custom.shares.must.sum"));
       } else {
         const base = Math.floor(totalMinor / ids.length);
         let remainder = totalMinor - base * ids.length;
         allocations = ids.map((memberId) => ({ memberId, cents: base + (remainder-- > 0 ? 1 : 0) }));
       }
       const groupId = data.get("group");
-      const saved = await commit("EXPENSE_RECORDED", { description: String(data.get("description")).trim(), payerId, amountMinor: details.amountMinor, currency: details.currency, baseAmountMinor: details.baseAmountMinor, totalCents: details.baseAmountMinor, fx: details.fx, allocations, groupIds: groupId ? [groupId] : [], evidenceIds: [...pendingEvidenceIds] }, "Expense entered into the ledger.");
+      const saved = await commit("EXPENSE_RECORDED", { description: String(data.get("description")).trim(), payerId, amountMinor: details.amountMinor, currency: details.currency, baseAmountMinor: details.baseAmountMinor, totalCents: details.baseAmountMinor, fx: details.fx, allocations, groupIds: groupId ? [groupId] : [], evidenceIds: [...pendingEvidenceIds] }, t("msg.expense.entered.into.the"));
       if (saved) pendingEvidenceIds = [];
     } catch (error) { showToast(error.message); }
   });
 
   document.querySelectorAll(".expense-confirm").forEach((button) => button.addEventListener("click", () => {
     const access = getAccessContext();
-    commit("MEMBER_CONFIRMED_EXPENSE", { expenseId: button.dataset.expenseId, memberId: access.memberId, decision: "accepted" }, "Your share confirmation was recorded.");
+    commit("MEMBER_CONFIRMED_EXPENSE", { expenseId: button.dataset.expenseId, memberId: access.memberId, decision: "accepted" }, t("msg.your.share.confirmation.was"));
   }));
 
   document.querySelectorAll(".discrepancy-form").forEach((form) => form.addEventListener("submit", (event) => {
     event.preventDefault();
     const claim = String(new FormData(form).get("claim")).trim();
-    if (!claim) { const output = form.querySelector("[data-action-error]"); output.textContent = "Describe what does not match before submitting."; output.hidden = false; form.elements.claim.focus(); return; }
-    commitFromForm(form, "EXPENSE_DISCREPANCY_RECORDED", { expenseId: form.dataset.expenseId, discrepancyId: crypto.randomUUID(), raisedByMemberId: getAccessContext().memberId, claim }, "Discrepancy recorded for organizer review.");
+    if (!claim) { const output = form.querySelector("[data-action-error]"); output.textContent = t("msg.describe.what.does.not"); output.hidden = false; form.elements.claim.focus(); return; }
+    commitFromForm(form, "EXPENSE_DISCREPANCY_RECORDED", { expenseId: form.dataset.expenseId, discrepancyId: crypto.randomUUID(), raisedByMemberId: getAccessContext().memberId, claim }, t("msg.discrepancy.recorded.for.organizer"));
   }));
 
   document.querySelectorAll(".resolution-form").forEach((form) => form.addEventListener("submit", (event) => {
     event.preventDefault();
     const resolution = String(new FormData(form).get("resolution")).trim();
-    if (!resolution) { const output = form.querySelector("[data-action-error]"); output.textContent = "Record how this discrepancy was resolved."; output.hidden = false; form.elements.resolution.focus(); return; }
-    commitFromForm(form, "EXPENSE_DISCREPANCY_RESOLVED", { discrepancyId: form.dataset.discrepancyId, resolution }, "Discrepancy resolution recorded.");
+    if (!resolution) { const output = form.querySelector("[data-action-error]"); output.textContent = t("msg.record.how.this.discrepancy"); output.hidden = false; form.elements.resolution.focus(); return; }
+    commitFromForm(form, "EXPENSE_DISCREPANCY_RESOLVED", { discrepancyId: form.dataset.discrepancyId, resolution }, t("msg.discrepancy.resolution.recorded"));
   }));
 
   document.querySelector("#payment-form")?.addEventListener("submit", (event) => {
@@ -748,28 +748,28 @@ function bindPage(current) {
     try {
       const data = new FormData(event.currentTarget);
       const fromId = data.get("from"); const toId = data.get("to");
-      if (fromId === toId) throw new Error("Choose two different participants.");
+      if (fromId === toId) throw new Error(t("msg.choose.two.different.participants"));
       const cents = parseLedgerAmount(data.get("amount"));
-      commit("SETTLEMENT_ASSERTED", { settlementId: crypto.randomUUID(), fromMemberId: fromId, toMemberId: toId, amountMinor: cents, rail: "other" }, "Payment claim is pending. Balances remain unchanged until confirmation.");
+      commit("SETTLEMENT_ASSERTED", { settlementId: crypto.randomUUID(), fromMemberId: fromId, toMemberId: toId, amountMinor: cents, rail: "other" }, t("msg.payment.claim.is.pending"));
     } catch (error) { showToast(error.message); }
   });
 
   document.querySelectorAll(".confirm-payment").forEach((button) => button.addEventListener("click", () => {
     const access = getAccessContext();
-    commit("SETTLEMENT_CONFIRMED", { settlementId: button.dataset.settlementId, confirmedByMemberId: access.memberId, confirmationSource: "recipient_confirmation" }, "You confirmed receipt. The settlement now updates balances.");
+    commit("SETTLEMENT_CONFIRMED", { settlementId: button.dataset.settlementId, confirmedByMemberId: access.memberId, confirmationSource: "recipient_confirmation" }, t("msg.you.confirmed.receipt.the"));
   }));
 
   document.querySelector("#paypal-checkout")?.addEventListener("click", async () => {
     try {
       const data = new FormData(document.querySelector("#payment-form"));
       const fromMemberId = data.get("from"); const toMemberId = data.get("to");
-      if (!fromMemberId || !toMemberId || fromMemberId === toMemberId) throw new Error("Choose two different participants.");
+      if (!fromMemberId || !toMemberId || fromMemberId === toMemberId) throw new Error(t("msg.choose.two.different.participants"));
       const amountMinor = parseLedgerAmount(data.get("amount"));
       const sessionId = localStorage.getItem("the-black-ledger.session.v1");
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/payments`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}`, "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ fromMemberId, toMemberId, amountMinor }) });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Could not create PayPal checkout.");
-      if (!result.approvalUrl) throw new Error("PayPal returned no buyer approval link.");
+      if (!response.ok) throw new Error(result.error ?? t("msg.could.not.create.paypal"));
+      if (!result.approvalUrl) throw new Error(t("msg.paypal.returned.no.buyer"));
       location.assign(result.approvalUrl);
     } catch (error) { showToast(error.message); }
   });
@@ -779,8 +779,8 @@ function bindPage(current) {
     try {
       const data = new FormData(form);
       const amountMinor = parseLedgerAmount(data.get("amount"));
-      if (amountMinor > Number(form.dataset.max)) throw new Error("Forgiveness cannot exceed the remaining obligation.");
-      const saved = commitFromForm(form, "OBLIGATION_FORGIVEN", { debtorId: form.dataset.debtor, creditorId: form.dataset.creditor, amountMinor, reason: String(data.get("reason")).trim() }, "Partial forgiveness recorded. No payment was created.");
+      if (amountMinor > Number(form.dataset.max)) throw new Error(t("msg.forgiveness.cannot.exceed.the"));
+      const saved = commitFromForm(form, "OBLIGATION_FORGIVEN", { debtorId: form.dataset.debtor, creditorId: form.dataset.creditor, amountMinor, reason: String(data.get("reason")).trim() }, t("msg.partial.forgiveness.recorded.no"));
       void saved;
     } catch (error) {
       const output = form.querySelector("[data-action-error]");
@@ -794,8 +794,8 @@ function bindPage(current) {
     try {
       const data = new FormData(form);
       const amountMinor = parseLedgerAmount(data.get("amount"));
-      if (amountMinor > Number(form.dataset.max)) throw new Error("You cannot assume more than the remaining obligation.");
-      commitFromForm(form, "RESPONSIBILITY_ASSUMED", { fromMemberId: form.dataset.debtor, toMemberId: getAccessContext().memberId, creditorMemberId: form.dataset.creditor, amountMinor, reason: String(data.get("reason")).trim() }, "Responsibility transfer recorded with your acceptance.");
+      if (amountMinor > Number(form.dataset.max)) throw new Error(t("msg.you.cannot.assume.more"));
+      commitFromForm(form, "RESPONSIBILITY_ASSUMED", { fromMemberId: form.dataset.debtor, toMemberId: getAccessContext().memberId, creditorMemberId: form.dataset.creditor, amountMinor, reason: String(data.get("reason")).trim() }, t("msg.responsibility.transfer.recorded.with"));
     } catch (error) {
       const output = form.querySelector("[data-action-error]");
       output.textContent = error.message;
@@ -814,11 +814,11 @@ async function hydrateEvidenceImages() {
   for (const image of document.querySelectorAll("img[data-evidence]")) {
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/evidence/${encodeURIComponent(image.dataset.evidence)}`, { headers: { authorization: `Bearer ${token}` } });
-      if (!response.ok) { image.replaceWith(Object.assign(document.createElement("small"), { textContent: "Photo unavailable." })); continue; }
+      if (!response.ok) { image.replaceWith(Object.assign(document.createElement("small"), { textContent: t("msg.photo.unavailable") })); continue; }
       const url = URL.createObjectURL(await response.blob());
       evidenceObjectUrls.push(url);
       image.src = url;
-    } catch { image.replaceWith(Object.assign(document.createElement("small"), { textContent: "Photo unavailable." })); }
+    } catch { image.replaceWith(Object.assign(document.createElement("small"), { textContent: t("msg.photo.unavailable") })); }
   }
 }
 
@@ -856,7 +856,7 @@ function render() {
   document.querySelector("#archive-button")?.addEventListener("click", () => {
     const dialog = document.querySelector("#confirm-dialog");
     const blockers = current.closureBlockers;
-    document.querySelector("#archive-balance-note").textContent = blockers.length ? `This will be a provisional close. ${blockers.map((item) => item.message).join(" ")}` : "All records are resolved and participant balances net to zero. This final close makes the ledger read-only.";
+    document.querySelector("#archive-balance-note").textContent = blockers.length ? `This will be a provisional close. ${blockers.map((item) => item.message).join(" ")}` : t("msg.all.records.are.resolved");
     dialog.showModal();
   });
 }
@@ -875,11 +875,11 @@ document.querySelector("#language-toggle")?.addEventListener("click", () => {
 const syncChannel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("the-black-ledger-sync-v1");
 syncChannel?.addEventListener("message", async (event) => {
   if (event.data?.sessionId !== localStorage.getItem("the-black-ledger.session.v1")) return;
-  try { events = await loadLedger(); render(); showToast("The ledger was refreshed from another tab."); }
+  try { events = await loadLedger(); render(); showToast(t("msg.the.ledger.was.refreshed")); }
   catch (error) { showToast(error.message); }
 });
 document.querySelector("#export-button").addEventListener("click", async () => {
-  try { await exportLedger(); showToast("The integrity-checked evidence package was exported."); }
+  try { await exportLedger(); showToast(t("msg.the.integritychecked.evidence.package")); }
   catch (error) { showToast(error.message); }
 });
 document.querySelector("#cancel-archive").addEventListener("click", () => document.querySelector("#confirm-dialog").close());
@@ -887,7 +887,7 @@ document.querySelector("#confirm-archive").addEventListener("click", () => {
   const current = ledger();
   const provisional = current.closureBlockers.length > 0;
   document.querySelector("#confirm-dialog").close();
-  commit(provisional ? "SESSION_CLOSED_PROVISIONAL" : "SESSION_CLOSED_FINAL", { reason: provisional ? "Organizer accepted a provisional close; outstanding records remain visible." : "All closure checks passed." }, provisional ? "Provisional close recorded. The ledger remains open for resolution." : "The journey was finally closed. Its record is read-only.");
+  commit(provisional ? "SESSION_CLOSED_PROVISIONAL" : "SESSION_CLOSED_FINAL", { reason: provisional ? t("msg.organizer.accepted.a.provisional") : t("msg.all.closure.checks.passed") }, provisional ? t("msg.provisional.close.recorded.the") : t("msg.the.journey.was.finally"));
 });
 render();
 const paymentReturn = new URLSearchParams(location.search);
@@ -896,8 +896,8 @@ if (paymentReturn.get("payment") === "return" && paymentReturn.get("token")) {
   history.replaceState(null, "", `${location.pathname}#payments`);
   const sessionId = localStorage.getItem("the-black-ledger.session.v1");
   fetch(`/api/sessions/${encodeURIComponent(sessionId)}/payments/${encodeURIComponent(orderId)}/capture`, { method: "POST", headers: { authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` } })
-    .then(async (response) => { const result = await response.json(); if (!response.ok) throw new Error(result.error ?? "PayPal capture failed."); return result; })
-    .then(async (result) => { events = await loadLedger(); render(); showToast(result.status === "COMPLETED" ? "PayPal capture confirmed by the server." : result.status === "RECONCILIATION_REQUIRED" ? "PayPal completed the capture. Organizer reconciliation is required before balances change." : "PayPal payment is still pending confirmation."); })
+    .then(async (response) => { const result = await response.json(); if (!response.ok) throw new Error(result.error ?? t("msg.paypal.capture.failed")); return result; })
+    .then(async (result) => { events = await loadLedger(); render(); showToast(result.status === "COMPLETED" ? t("msg.paypal.capture.confirmed.by") : result.status === "RECONCILIATION_REQUIRED" ? t("msg.paypal.completed.the.capture") : t("msg.paypal.payment.is.still")); })
     .catch((error) => showToast(error.message));
 } else if (paymentReturn.get("payment") === "cancel") {
   const orderId = paymentReturn.get("token");
@@ -905,7 +905,7 @@ if (paymentReturn.get("payment") === "return" && paymentReturn.get("token")) {
   if (orderId) {
     const sessionId = localStorage.getItem("the-black-ledger.session.v1");
     fetch(`/api/sessions/${encodeURIComponent(sessionId)}/payments/${encodeURIComponent(orderId)}/cancel`, { method: "POST", headers: { authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` } })
-      .then(async (response) => { const result = await response.json(); if (!response.ok) throw new Error(result.error ?? "Could not record checkout cancellation."); events = await loadLedger(); render(); showToast("PayPal checkout was cancelled. Ledger balances did not change."); })
+      .then(async (response) => { const result = await response.json(); if (!response.ok) throw new Error(result.error ?? t("msg.could.not.record.checkout")); events = await loadLedger(); render(); showToast(t("msg.paypal.checkout.was.cancelled")); })
       .catch((error) => showToast(error.message));
-  } else showToast("PayPal checkout was cancelled. Ledger balances did not change.");
+  } else showToast(t("msg.paypal.checkout.was.cancelled"));
 }
