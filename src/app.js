@@ -1,5 +1,6 @@
 import { deriveLedger, findPossibleDuplicates, formatMoney, parseAmountToMinor, SUPPORTED_CURRENCIES, settleUp } from "./domain.js";
 import { deriveNarrativeEvents } from "./domain/narrative.js";
+import { t, currentLanguage, setLanguage } from "./i18n.js";
 import { appendEvent, exportLedger, loadLedger, takeAppendWarnings, getAccessContext, getServerState } from "./store.js";
 
 const view = document.querySelector("#view");
@@ -815,7 +816,22 @@ async function hydrateEvidenceImages() {
   }
 }
 
+// The shell is static HTML, so its text is filled from the dictionary rather
+// than rebuilt. Defaults in the markup stay readable if this never runs.
+function applyShellTranslations() {
+  document.documentElement.lang = currentLanguage();
+  for (const node of document.querySelectorAll("[data-i18n]")) node.textContent = t(node.dataset.i18n);
+  for (const node of document.querySelectorAll("[data-i18n-html]")) node.innerHTML = t(node.dataset.i18nHtml);
+  for (const node of document.querySelectorAll("[data-i18n-attr]")) {
+    const [attribute, key] = node.dataset.i18nAttr.split(":");
+    if (attribute && key) node.setAttribute(attribute, t(key));
+  }
+  const toggle = document.querySelector("#language-toggle");
+  if (toggle) toggle.textContent = currentLanguage().toUpperCase();
+}
+
 function render() {
+  applyShellTranslations();
   if (!events) return;
   const current = ledger();
   document.querySelector("#export-button").hidden = getAccessContext().role !== "organizer";
@@ -844,6 +860,12 @@ document.querySelector("#main-nav").addEventListener("click", (event) => {
   if (link) route = link.dataset.route;
 });
 window.addEventListener("hashchange", () => { route = location.hash.slice(1).split("/")[0] || "home"; render(); });
+
+// Bound once: the badge sits outside the rendered view, so it survives renders.
+document.querySelector("#language-toggle")?.addEventListener("click", () => {
+  setLanguage(currentLanguage() === "es" ? "en" : "es");
+  render();
+});
 const syncChannel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("the-black-ledger-sync-v1");
 syncChannel?.addEventListener("message", async (event) => {
   if (event.data?.sessionId !== localStorage.getItem("the-black-ledger.session.v1")) return;

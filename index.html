@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#100e0d">
-    <meta name="description" content="A surreal shared-expense ledger. Every balance has a record.">
+    <meta name="description" data-i18n-attr="content:meta.description" content="A surreal shared-expense ledger. Every balance has a record.">
     <title>The Black Ledger</title>
     <link rel="stylesheet" href="/styles.css">
     <script type="module" src="/src/app.js"></script>
@@ -12,43 +12,43 @@
   <body>
     <div class="app-shell">
       <header class="masthead">
-        <a class="brand" href="#home" aria-label="The Black Ledger home">
+        <a class="brand" href="#home" data-i18n-attr="aria-label:brand.home" aria-label="The Black Ledger home">
           <span class="brand-mark" aria-hidden="true">▤</span>
-          <span><strong>The Black Ledger</strong><small>Where every debt leaves a trace</small></span>
+          <span><strong data-i18n="brand.name">The Black Ledger</strong><small data-i18n="brand.tagline">Where every debt leaves a trace</small></span>
         </a>
-        <div class="masthead-right"><span class="local-badge"><i></i> LOCAL LEDGER</span><span class="icon-button" aria-label="Interface language: English">EN</span></div>
+        <div class="masthead-right"><span class="local-badge"><i></i> <span data-i18n="shell.localBadge">LOCAL LEDGER</span></span><button class="icon-button" id="language-toggle" type="button" data-i18n-attr="aria-label:shell.languageLabel" aria-label="Interface language">EN</button></div>
       </header>
 
       <div id="storage-error" class="storage-error" role="alert" hidden></div>
 
       <main class="layout" id="application">
-        <aside class="rail" aria-label="Ledger chambers">
-          <div class="rail-label">The Chambers</div>
+        <aside class="rail" data-i18n-attr="aria-label:shell.chambersLabel" aria-label="Ledger chambers">
+          <div class="rail-label" data-i18n="shell.chambers">The Chambers</div>
           <nav id="main-nav" class="main-nav">
-            <a class="nav-link active" href="#home" data-route="home"><span class="nav-icon">◈</span><span><b>The Ledger</b><small>Session overview</small></span></a>
-            <a class="nav-link" href="#members" data-route="members"><span class="nav-icon">◉</span><span><b>The Broken Mirror</b><small>Those bound by debt</small></span></a>
-            <a class="nav-link" href="#expenses" data-route="expenses"><span class="nav-icon">⌕</span><span><b>The Black Telephone</b><small>Evidence of spending</small></span></a>
-            <a class="nav-link" href="#history" data-route="history"><span class="nav-icon">▤</span><span><b>Memory Extraction</b><small>Events that remain</small></span></a>
-            <a class="nav-link" href="#payments" data-route="payments"><span class="nav-icon">♢</span><span><b>The Elixir</b><small>Record a settlement</small></span></a>
-            <a class="nav-link" href="#verdict" data-route="verdict"><span class="nav-icon">⚖</span><span><b>The Verdict</b><small>How balance is restored</small></span></a>
+            <a class="nav-link active" href="#home" data-route="home"><span class="nav-icon">◈</span><span><b data-i18n="nav.home">The Ledger</b><small data-i18n="nav.home.sub">Session overview</small></span></a>
+            <a class="nav-link" href="#members" data-route="members"><span class="nav-icon">◉</span><span><b data-i18n="nav.members">The Broken Mirror</b><small data-i18n="nav.members.sub">Those bound by debt</small></span></a>
+            <a class="nav-link" href="#expenses" data-route="expenses"><span class="nav-icon">⌕</span><span><b data-i18n="nav.expenses">The Black Telephone</b><small data-i18n="nav.expenses.sub">Evidence of spending</small></span></a>
+            <a class="nav-link" href="#history" data-route="history"><span class="nav-icon">▤</span><span><b data-i18n="nav.history">Memory Extraction</b><small data-i18n="nav.history.sub">Events that remain</small></span></a>
+            <a class="nav-link" href="#payments" data-route="payments"><span class="nav-icon">♢</span><span><b data-i18n="nav.payments">The Elixir</b><small data-i18n="nav.payments.sub">Record a settlement</small></span></a>
+            <a class="nav-link" href="#verdict" data-route="verdict"><span class="nav-icon">⚖</span><span><b data-i18n="nav.verdict">The Verdict</b><small data-i18n="nav.verdict.sub">How balance is restored</small></span></a>
           </nav>
-          <div class="rail-note"><span class="note-glyph">✳</span><p>AI may interpret.<br>People confirm.<br>The ledger calculates.</p></div>
-          <div class="rail-footer">A private ledger on this device</div>
+          <div class="rail-note"><span class="note-glyph">✳</span><p data-i18n-html="shell.note">AI may interpret.<br>People confirm.<br>The ledger calculates.</p></div>
+          <div class="rail-footer" data-i18n="shell.railFooter">A private ledger on this device</div>
         </aside>
 
         <section class="workspace">
           <div id="view" aria-live="polite"></div>
-          <footer class="page-footer"><span>THE BLACK LEDGER <b>·</b> AN ACCOUNT OF SHARED THINGS</span><button id="export-button" class="text-button" type="button">Export ledger data</button></footer>
+          <footer class="page-footer"><span data-i18n-html="shell.footerTitle">THE BLACK LEDGER <b>·</b> AN ACCOUNT OF SHARED THINGS</span><button id="export-button" class="text-button" type="button" data-i18n="shell.export">Export ledger data</button></footer>
         </section>
       </main>
     </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <dialog id="confirm-dialog" class="confirm-dialog">
-      <form method="dialog"><button class="dialog-close" aria-label="Close">×</button></form>
-      <div class="eyebrow">A final entry</div><h2>Archive this journey?</h2>
-      <p>The ledger will become read-only. Its events remain on this device and can still be exported.</p>
+      <form method="dialog"><button class="dialog-close" data-i18n-attr="aria-label:dialog.close" aria-label="Close">×</button></form>
+      <div class="eyebrow" data-i18n="dialog.eyebrow">A final entry</div><h2 data-i18n="dialog.title">Archive this journey?</h2>
+      <p data-i18n="dialog.body">The ledger will become read-only. Its events remain on this device and can still be exported.</p>
       <div id="archive-balance-note" class="archive-note"></div>
-      <div class="dialog-actions"><button class="button button-quiet" id="cancel-archive" type="button">Keep it open</button><button class="button button-danger" id="confirm-archive" type="button">Seal the memory</button></div>
+      <div class="dialog-actions"><button class="button button-quiet" id="cancel-archive" type="button" data-i18n="dialog.keep">Keep it open</button><button class="button button-danger" id="confirm-archive" type="button" data-i18n="dialog.seal">Seal the memory</button></div>
     </dialog>
   </body>
 </html>

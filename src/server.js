@@ -740,7 +740,7 @@ async function route(req, res) {
   }
   if (req.method !== "GET" || url.pathname.startsWith("/api/")) return send(res, 404, { error: "Route not found." });
   const requested = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
-  const publicFiles = new Set(["index.html", "styles.css", "src/app.js", "src/store.js", "src/domain.js", "src/domain/canonical.js", "src/domain/events.js", "src/domain/money.js", "src/domain/narrative.js"]);
+  const publicFiles = new Set(["index.html", "styles.css", "src/app.js", "src/i18n.js", "src/store.js", "src/domain.js", "src/domain/canonical.js", "src/domain/events.js", "src/domain/money.js", "src/domain/narrative.js"]);
   if (!publicFiles.has(requested) && !/^assets\/[a-zA-Z0-9_-]+\.(png|svg)$/.test(requested)) return send(res, 404, { error: "Not found." });
   const file = resolve(root, requested);
   if (!file.startsWith(`${root}${sep}`) || !existsSync(file) || !statSync(file).isFile() || realpathSync(file) !== file) return send(res, 404, { error: "Not found." });
