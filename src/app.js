@@ -1,6 +1,6 @@
 import { deriveLedger, findPossibleDuplicates, formatMoney, parseAmountToMinor, SUPPORTED_CURRENCIES, settleUp } from "./domain.js";
 import { deriveNarrativeEvents } from "./domain/narrative.js";
-import { t, currentLanguage, setLanguage } from "./i18n.js";
+import { t, tOptional, plural, currentLanguage, setLanguage } from "./i18n.js";
 import { appendEvent, exportLedger, loadLedger, takeAppendWarnings, getAccessContext, getServerState } from "./store.js";
 
 const view = document.querySelector("#view");
@@ -12,7 +12,8 @@ let toastTimer;
 let pendingEvidenceIds = [];
 const routes = new Set(["home", "members", "expenses", "history", "payments", "verdict"]);
 const h = (text) => String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const eventDate = (iso) => new Date(iso).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
+// Dates follow the chosen interface language, not a fixed locale.
+const eventDate = (iso) => new Date(iso).toLocaleString(currentLanguage() === "es" ? "es-AR" : "en-US", { dateStyle: "medium", timeStyle: "short" });
 const ledgerCurrency = () => events?.find((event) => event.type === "SESSION_CREATED")?.baseCurrency ?? "USD";
 // The viewer's own locale, so an ARS ledger reads 1.500,00 rather than 1,500.00.
 const displayLocale = typeof navigator !== "undefined" && navigator.language ? navigator.language : "en-US";
@@ -36,7 +37,7 @@ const ledger = () => {
     }
   });
 };
-const memberName = (id) => ledger().members.find((m) => m.id === id)?.name ?? "Unknown participant";
+const memberName = (id) => ledger().members.find((m) => m.id === id)?.name ?? t("member.unknown");
 
 try { events = await loadLedger(); }
 catch (error) { storageError.hidden = false; storageError.textContent = error.message; document.querySelector("#application").hidden = true; }
@@ -80,43 +81,43 @@ function header(title, subtitle, eyebrow = "THE LEDGER") {
 }
 
 function statusPill(current) {
-  return `<span class="status-pill ${current.archived ? "sealed" : "open"}"><i></i>${current.archived ? "Archived" : "Open journey"}</span>`;
+  return `<span class="status-pill ${current.archived ? "sealed" : "open"}"><i></i>${current.archived ? t("status.archived") : t("status.open")}</span>`;
 }
 
 function homePage(current) {
   const access = getAccessContext();
   const readOnly = access.role === "witness";
-  const balanceStatus = current.members.length === 0 ? "Awaiting entries" : [...current.balances.values()].every((value) => value === 0) ? "Balanced" : "Unsettled";
+  const balanceStatus = current.members.length === 0 ? "awaiting" : [...current.balances.values()].every((value) => value === 0) ? "balanced" : "unsettled";
   const narrative = deriveNarrativeEvents(current).at(-1);
-  return `${header("The Black Ledger", "A record of what was shared, and what remains.", "A PRIVATE ACCOUNT")}
-    <section class="hero-card"><div class="hero-copy"><div class="eyebrow">THE KEEPER'S BOOK IS OPEN</div><h2>Every debt<br><em>leaves a trace.</em></h2><p>Record the expense. Decide who shared it. The ledger will show its work.</p><a href="#expenses" class="button button-gold">Record an expense <span>↗</span></a></div><div class="hero-status">${statusPill(current)}<span>Stored in the shared ledger</span></div></section>
-    <section class="stat-grid"><article class="stat-card"><span>BOUND TO THIS JOURNEY</span><strong>${current.members.length}</strong><small>participants</small></article><article class="stat-card"><span>RECORDED EXPENDITURE</span><strong>${money(current.totalExpenses)}</strong><small>${current.expenses.length} expense${current.expenses.length === 1 ? "" : "s"}</small></article><article class="stat-card"><span>ACCOUNT CONDITION</span><strong class="condition ${balanceStatus === "Balanced" ? "good" : "pending"}">${balanceStatus}</strong><small>${current.settlements.length} recorded settlement${current.settlements.length === 1 ? "" : "s"}</small></article></section>
-    ${narrative ? `<div class="calculation-note"><span>◇</span><p><b>Fictional witness:</b> ${h(narrative.text)} This story never changes a balance.</p></div>` : ""}
-    <div class="content-grid"><section class="panel"><div class="section-title"><div><div class="eyebrow">THE WITNESSES</div><h2>People in the ledger</h2></div><a href="#members" class="text-button">All participants ↗</a></div>${current.members.length ? `<div class="member-list">${current.members.slice(0, 5).map((m) => memberCard(m, current)).join("")}</div>` : emptyState("No names have been entered.", "Add the people who shared this journey.", "#members", "Add the first participant")}</section><section class="panel recent-panel"><div class="section-title"><div><div class="eyebrow">THE LAST IMPRESSION</div><h2>Recent events</h2></div><a href="#history" class="text-button">Open memory ↗</a></div>${current.events.length ? `<div class="event-list compact">${[...current.events].reverse().slice(0, 4).map(eventRow).join("")}</div>` : emptyState("The pages are blank.", "The first record is waiting.", "#expenses", "Add an expense")}</section></div>
-    ${current.archived ? `<div class="sealed-banner"><span>✦</span><div><b>This journey is sealed.</b><p>Its record is read-only. Export it from the footer.</p></div></div>` : current.closure?.type === "provisional" ? `<div class="sealed-banner"><span>!</span><div><b>This journey has a provisional close.</b><p>${current.closureBlockers.length} open item(s) remain visible. Add records to resolve them, then close again.</p></div></div>` : current.events.length && access.role === "organizer" ? `<section class="closing-strip"><div><div class="eyebrow">WHEN THE JOURNEY ENDS</div><b>Keep the memory. Close the books.</b><p>A final close requires resolved records and zero balances. Otherwise the close stays provisional.</p></div><button class="button button-quiet" id="archive-button" type="button">Close this journey <span>→</span></button></section>` : ""}`;
+  return `${header(t("brand.name"), t("home.subtitle"), t("home.eyebrow"))}
+    <section class="hero-card"><div class="hero-copy"><div class="eyebrow">${t("home.hero.eyebrow")}</div><h2>${t("home.hero.title")}</h2><p>${t("home.hero.body")}</p><a href="#expenses" class="button button-gold">${t("home.hero.cta")} <span>↗</span></a></div><div class="hero-status">${statusPill(current)}<span>${t("home.hero.stored")}</span></div></section>
+    <section class="stat-grid"><article class="stat-card"><span>${t("home.stat.bound")}</span><strong>${current.members.length}</strong><small>${t("home.stat.participants")}</small></article><article class="stat-card"><span>${t("home.stat.spend")}</span><strong>${money(current.totalExpenses)}</strong><small>${plural(current.expenses.length, "home.stat.expenses")}</small></article><article class="stat-card"><span>${t("home.stat.condition")}</span><strong class="condition ${balanceStatus === "balanced" ? "good" : "pending"}">${t(`balance.${balanceStatus}`)}</strong><small>${plural(current.settlements.length, "home.stat.settlements")}</small></article></section>
+    ${narrative ? `<div class="calculation-note"><span>◇</span><p><b>${t("home.narrative.label")}</b> ${h(narrative.text)} ${t("home.narrative.note")}</p></div>` : ""}
+    <div class="content-grid"><section class="panel"><div class="section-title"><div><div class="eyebrow">${t("home.witnesses.eyebrow")}</div><h2>${t("home.witnesses.title")}</h2></div><a href="#members" class="text-button">${t("home.witnesses.all")}</a></div>${current.members.length ? `<div class="member-list">${current.members.slice(0, 5).map((m) => memberCard(m, current)).join("")}</div>` : emptyState(t("home.witnesses.emptyTitle"), t("home.witnesses.emptyBody"), "#members", t("home.witnesses.emptyAction"))}</section><section class="panel recent-panel"><div class="section-title"><div><div class="eyebrow">${t("home.recent.eyebrow")}</div><h2>${t("home.recent.title")}</h2></div><a href="#history" class="text-button">${t("home.recent.open")}</a></div>${current.events.length ? `<div class="event-list compact">${[...current.events].reverse().slice(0, 4).map(eventRow).join("")}</div>` : emptyState(t("home.recent.emptyTitle"), t("home.recent.emptyBody"), "#expenses", t("home.recent.emptyAction"))}</section></div>
+    ${current.archived ? `<div class="sealed-banner"><span>✦</span><div><b>${t("home.sealed.title")}</b><p>${t("home.sealed.body")}</p></div></div>` : current.closure?.type === "provisional" ? `<div class="sealed-banner"><span>!</span><div><b>${t("home.provisional.title")}</b><p>${t("home.provisional.body", { count: current.closureBlockers.length })}</p></div></div>` : current.events.length && access.role === "organizer" ? `<section class="closing-strip"><div><div class="eyebrow">${t("home.closing.eyebrow")}</div><b>${t("home.closing.title")}</b><p>${t("home.closing.body")}</p></div><button class="button button-quiet" id="archive-button" type="button">${t("home.closing.cta")} <span>→</span></button></section>` : ""}`;
 }
 
 function memberCard(member, current, showStatusControl = false) {
   const cents = current.balances.get(member.id) || 0;
   const status = member.status ?? "active";
-  const statusControl = showStatusControl && getAccessContext().role === "organizer" && !current.archived && status !== "removed" ? `<button class="button button-quiet member-status" type="button" data-member-id="${h(member.id)}" data-next-status="${status === "active" ? "departed" : "active"}">${status === "active" ? "Mark departed" : "Reactivate"}</button>` : "";
-  return `<article class="member-row"><span class="avatar">${h(member.name.trim().slice(0, 1).toUpperCase())}</span><span class="member-name"><b>${h(member.name)}</b><small>${status === "active" ? "Active participant" : h(status)} · Witness ${String(current.members.findIndex((m) => m.id === member.id) + 1).padStart(2, "0")}</small></span><strong class="money ${cents > 0 ? "credit" : cents < 0 ? "debit" : "neutral"}">${cents > 0 ? "+" : cents < 0 ? "−" : ""}${money(Math.abs(cents))}</strong>${statusControl}${balanceBreakdown(member, current)}</article>`;
+  const statusControl = showStatusControl && getAccessContext().role === "organizer" && !current.archived && status !== "removed" ? `<button class="button button-quiet member-status" type="button" data-member-id="${h(member.id)}" data-next-status="${status === "active" ? "departed" : "active"}">${status === "active" ? t("member.markDeparted") : t("member.reactivate")}</button>` : "";
+  return `<article class="member-row"><span class="avatar">${h(member.name.trim().slice(0, 1).toUpperCase())}</span><span class="member-name"><b>${h(member.name)}</b><small>${status === "active" ? t("member.active") : t(`member.${status}`)} · ${t("member.witness", { n: String(current.members.findIndex((m) => m.id === member.id) + 1).padStart(2, "0") })}</small></span><strong class="money ${cents > 0 ? "credit" : cents < 0 ? "debit" : "neutral"}">${cents > 0 ? "+" : cents < 0 ? "−" : ""}${money(Math.abs(cents))}</strong>${statusControl}${balanceBreakdown(member, current)}</article>`;
 }
 
 function balanceBreakdown(member, current) {
   const rows = current.balanceBreakdowns.get(member.id) ?? [];
-  const labels = { expense: "Expense share", conversion_fee: "Conversion fee", carried_in: "Debt carried in", carried_out: "Debt carried out", forgiveness: "Debt forgiven", responsibility_released: "Responsibility released", responsibility_assumed: "Responsibility assumed", payment: "Confirmed payment", payment_refund: "Payment refund" };
+  
   const signed = (amount) => `${amount > 0 ? "+" : amount < 0 ? "−" : ""}${money(Math.abs(amount))}`;
   const pending = current.settlements.filter((payment) => ["pending", "asserted"].includes(payment.status) && [payment.fromId, payment.toId].includes(member.id));
-  return `<details class="balance-breakdown"><summary>Where does my balance come from?</summary><p>Positive means you are owed money; negative means you owe money. These are current contributions, not a running timeline.</p>${rows.length ? `<ol>${rows.map((row) => {
-    const kind = labels[row.kind] ?? row.kind;
+  return `<details class="balance-breakdown"><summary>${t("breakdown.summary")}</summary><p>${t("breakdown.intro")}</p>${rows.length ? `<ol>${rows.map((row) => {
+    const kind = t(`kind.${row.kind}`);
     const record = current.expenses.find((item) => item.id === row.recordId);
-    const counterparty = current.members.find((item) => item.id === row.counterpartyId)?.name ?? "Unknown participant";
+    const counterparty = current.members.find((item) => item.id === row.counterpartyId)?.name ?? t("member.unknown");
     const title = record?.description ? h(record.description) : h(kind);
-    const detail = record?.description ? `${h(kind)} · With ${h(counterparty)}` : `With ${h(counterparty)}`;
-    const links = row.eventIds.map((id, index) => `<a href="#history/${encodeURIComponent(id)}" title="${h(id)}">${row.eventIds.length > 1 ? `View event ${index + 1}` : "View event"}</a>`).join(" · ");
+    const detail = record?.description ? `${h(kind)} · ${t("breakdown.with", { name: h(counterparty) })}` : t("breakdown.with", { name: h(counterparty) });
+    const links = row.eventIds.map((id, index) => `<a href="#history/${encodeURIComponent(id)}" title="${h(id)}">${row.eventIds.length > 1 ? t("breakdown.viewEventNumbered", { n: index + 1 }) : t("breakdown.viewEvent")}</a>`).join(" · ");
     return `<li><span><b>${title}</b><small>${detail}</small><span class="balance-references">${links}</span></span><strong>${signed(row.deltaMinor)}</strong></li>`;
-  }).join("")}</ol>` : "<p>No posted contributions.</p>"}<div class="balance-total"><b>Current balance</b><strong>${signed(current.balances.get(member.id) ?? 0)}</strong></div><p>${pending.length} pending payment claim(s), excluded from this balance. Unassigned expenses and reversed payments are also excluded.</p></details>`;
+  }).join("")}</ol>` : `<p>${t("breakdown.none")}</p>`}<div class="balance-total"><b>${t("breakdown.total")}</b><strong>${signed(current.balances.get(member.id) ?? 0)}</strong></div><p>${plural(pending.length, "breakdown.pending")}</p></details>`;
 }
 
 function emptyState(title, body, href, action) {
@@ -197,7 +198,7 @@ function giftSection(current) {
   const payers = activeMembers.filter((member) => member.id !== defaultRecipient).map((member) => `<option value="${h(member.id)}">${h(member.name)}</option>`).join("");
   const contributors = activeMembers.map((member) => `<label class="check-row"><input type="checkbox" name="giftContributor" value="${h(member.id)}" ${member.id === defaultRecipient ? "" : "checked"}><span>${h(member.name)}</span></label>`).join("");
   const form = canCreate ? `<form class="form-panel" id="gift-form"><div class="eyebrow">THE PACT OF SILENCE</div><h2>Record a surprise gift</h2><div class="field-grid"><label>Private description<input name="description" maxlength="240" required></label><label>Amount <span class="field-hint">${h(ledgerCurrency())}</span><input name="amount" inputmode="decimal" required></label><label>Recipient<select name="recipient" id="gift-recipient" required>${recipients}</select></label><label>Who paid upfront?<select name="payer" id="gift-payer" required>${payers}</select></label></div><fieldset class="beneficiary-fieldset"><legend>Who contributed? The recipient cannot be included.</legend><div class="check-grid">${contributors}</div></fieldset><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record privately</button><p class="field-hint">The recipient sees a confidential entry; other ledger participants can review its description and contributions.</p></form>` : "";
-  return `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PACT OF SILENCE</div><h2>Surprise gifts</h2></div><span class="count">${current.gifts.length} records</span></div>${form}${!current.gifts.length ? `<p class="empty-inline">No surprise gifts have been recorded.</p>` : `<div class="member-list">${current.gifts.map((gift) => `<article class="member-row"><span class="avatar">✳</span><span class="member-name"><b>${access.memberId === gift.recipientMemberId ? "Confidential surprise gift" : h(gift.privateDescription)}</b><small>For ${h(current.members.find((member) => member.id === gift.recipientMemberId)?.name ?? "Unknown participant")} · ${gift.contributions.length} contributor${gift.contributions.length === 1 ? "" : "s"}</small></span><strong>${money(gift.amountMinor)}</strong></article>`).join("")}</div>`}</section>`;
+  return `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">THE PACT OF SILENCE</div><h2>Surprise gifts</h2></div><span class="count">${current.gifts.length} records</span></div>${form}${!current.gifts.length ? `<p class="empty-inline">No surprise gifts have been recorded.</p>` : `<div class="member-list">${current.gifts.map((gift) => `<article class="member-row"><span class="avatar">✳</span><span class="member-name"><b>${access.memberId === gift.recipientMemberId ? "Confidential surprise gift" : h(gift.privateDescription)}</b><small>For ${h(current.members.find((member) => member.id === gift.recipientMemberId)?.name ?? t("member.unknown"))} · ${gift.contributions.length} contributor${gift.contributions.length === 1 ? "" : "s"}</small></span><strong>${money(gift.amountMinor)}</strong></article>`).join("")}</div>`}</section>`;
 }
 
 function commitmentSection(current) {
@@ -208,7 +209,7 @@ function commitmentSection(current) {
   const participantOptions = activeMembers.map((member) => `<label class="check-row"><input type="checkbox" name="commitmentMember" value="${h(member.id)}" checked><span>${h(member.name)}</span></label>`).join("");
   const form = canCreate ? `<form class="form-panel" id="commitment-form"><div class="eyebrow">BEFORE THE RECEIPT</div><h2>Record a commitment</h2><div class="field-grid"><label>Description<input name="description" maxlength="240" required></label><label>Expected amount <span class="field-hint">${h(ledgerCurrency())}</span><input name="amount" inputmode="decimal" required></label><label>Who committed to pay?<select name="payer" required>${payerOptions}</select></label><label>Refundability<select name="refundability" required><option value="refundable">Refundable</option><option value="partially_refundable">Partially refundable</option><option value="nonrefundable">Non-refundable</option></select></label></div><fieldset class="beneficiary-fieldset"><legend>Who shares this commitment?</legend><div class="check-grid">${participantOptions}</div></fieldset><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record commitment</button></form>` : "";
   const entries = current.commitments.map((item) => {
-    const payerName = current.members.find((member) => member.id === item.payerMemberId)?.name ?? "Unknown participant";
+    const payerName = current.members.find((member) => member.id === item.payerMemberId)?.name ?? t("member.unknown");
     const remaining = item.amountMinor - (item.refundedMinor ?? 0);
     const linkedExpense = current.expenses.find((expense) => expense.commitmentId === item.commitmentId && expense.status !== "unassigned");
     const canManage = !current.archived && item.status === "open" && (access.role === "organizer" || access.role === "member" && access.memberId === item.payerMemberId);
@@ -274,9 +275,9 @@ function expenseRow(event, current) {
   const possibleDuplicates = findPossibleDuplicates(earlierExpenses, event);
   const originalAmount = event.currency !== ledgerCurrency() ? ` · original ${formatMoney(event.amountMinor, event.currency)}` : "";
   const fxEvidence = event.fx ? ` · FX ${event.fx.numerator}/${event.fx.denominator} ${event.fx.targetCurrency}/${event.fx.sourceCurrency} from ${h(event.fx.source)} at ${eventDate(event.fx.observedAt)}` : "";
-  const feeEvidence = event.fx?.feeMinor ? ` · conversion fee ${money(event.fx.feeMinor)} paid by ${h(current.members.find((member) => member.id === event.fx.feePayerMemberId)?.name ?? "Unknown participant")}` : "";
+  const feeEvidence = event.fx?.feeMinor ? ` · conversion fee ${money(event.fx.feeMinor)} paid by ${h(current.members.find((member) => member.id === event.fx.feePayerMemberId)?.name ?? t("member.unknown"))}` : "";
   const duplicateNotice = possibleDuplicates.length ? `<div class="duplicate-notice" role="note"><b>Possible duplicate; review before relying on this entry.</b>${possibleDuplicates.map((match) => { const prior = current.expenses.find((expense) => expense.id === match.expenseId); return `<small>Similar to “${h(prior?.description ?? "expense")}” recorded ${prior ? eventDate(prior.at) : "earlier"}. ${h(match.reason)}. No entry was removed.</small>`; }).join("")}</div>` : "";
-  return `<article class="expense-row"><span class="row-icon">⌕</span><span class="expense-meta"><b>${h(event.description)}</b><small>Paid by ${h(current.members.find((member) => member.id === event.payerId)?.name ?? "Unknown participant")} · Shared by ${event.allocations.length} participant${event.allocations.length === 1 ? "" : "s"}${groupNames.length ? ` · ${groupNames.map(h).join(", ")}` : ""}${originalAmount}${fxEvidence}${feeEvidence} · ${eventDate(event.at)}</small>${duplicateNotice}</span><strong>${money(event.totalCents)}</strong>${expenseReview(event, current)}</article>`;
+  return `<article class="expense-row"><span class="row-icon">⌕</span><span class="expense-meta"><b>${h(event.description)}</b><small>Paid by ${h(current.members.find((member) => member.id === event.payerId)?.name ?? t("member.unknown"))} · Shared by ${event.allocations.length} participant${event.allocations.length === 1 ? "" : "s"}${groupNames.length ? ` · ${groupNames.map(h).join(", ")}` : ""}${originalAmount}${fxEvidence}${feeEvidence} · ${eventDate(event.at)}</small>${duplicateNotice}</span><strong>${money(event.totalCents)}</strong>${expenseReview(event, current)}</article>`;
 }
 
 function expenseReview(expense, current) {
@@ -287,29 +288,34 @@ function expenseReview(expense, current) {
   const ownConfirmation = confirmations.find((item) => item.memberId === access.memberId);
   const openOwnDispute = discrepancies.find((item) => item.raisedByMemberId === access.memberId && !item.resolution);
   const canAct = assigned && !current.archived;
-  const reviewSummary = confirmations.length ? confirmations.map((item) => `${h(current.members.find((member) => member.id === item.memberId)?.name ?? "Unknown participant")}: ${h(item.decision)}`).join(" · ") : "No participant has confirmed a share yet.";
+  const reviewSummary = confirmations.length ? confirmations.map((item) => `${h(current.members.find((member) => member.id === item.memberId)?.name ?? t("member.unknown"))}: ${h(item.decision)}`).join(" · ") : "No participant has confirmed a share yet.";
   const confirmationControl = canAct ? ownConfirmation?.decision === "accepted" ? `<span class="status-pill open">Your share is confirmed</span>` : `<button class="button button-quiet expense-confirm" type="button" data-expense-id="${h(expense.id)}">Confirm my share</button>` : "";
   const disputeControl = canAct && !openOwnDispute ? `<details class="expense-dispute"><summary>Report a discrepancy</summary><form class="discrepancy-form" data-expense-id="${h(expense.id)}"><label>What does not match?<textarea name="claim" maxlength="500" required></textarea></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Record discrepancy</button></form></details>` : openOwnDispute ? `<p class="dispute-note">Your discrepancy is awaiting resolution.</p>` : "";
-  const disputeRows = discrepancies.map((item) => `<div class="dispute-note"><b>${h(current.members.find((member) => member.id === item.raisedByMemberId)?.name ?? "Unknown participant")} reported:</b> ${h(item.claim)}${item.resolution ? `<br><b>Resolution:</b> ${h(item.resolution)}` : access.role === "organizer" && !current.archived ? `<form class="resolution-form" data-discrepancy-id="${h(item.discrepancyId)}"><label>Resolution<textarea name="resolution" maxlength="500" required></textarea></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Resolve discrepancy</button></form>` : "<br><span>Awaiting organizer review.</span>"}</div>`).join("");
+  const disputeRows = discrepancies.map((item) => `<div class="dispute-note"><b>${h(current.members.find((member) => member.id === item.raisedByMemberId)?.name ?? t("member.unknown"))} reported:</b> ${h(item.claim)}${item.resolution ? `<br><b>Resolution:</b> ${h(item.resolution)}` : access.role === "organizer" && !current.archived ? `<form class="resolution-form" data-discrepancy-id="${h(item.discrepancyId)}"><label>Resolution<textarea name="resolution" maxlength="500" required></textarea></label><output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">Resolve discrepancy</button></form>` : "<br><span>Awaiting organizer review.</span>"}</div>`).join("");
   return `<section class="expense-review" aria-label="Participant review for ${h(expense.description)}"><p><b>Share review:</b> ${reviewSummary}</p>${confirmationControl}${disputeControl}${disputeRows}</section>`;
 }
 
 function eventDescription(event) {
-  if (event.type === "MEMBER_ADDED") return `<b>${h(event.name)}</b> entered the mirror`;
-  if (event.type === "MEMBER_INVITED") return `<b>${h(event.name)}</b> was invited as a ${h(event.role)}`;
-  if (event.type === "EXPENSE_RECORDED") return `Expense recorded: <b>${h(event.description)}</b> · ${money(event.totalCents ?? event.baseAmountMinor ?? event.amountMinor)}`;
-  if (event.type === "EXPENSE_UNASSIGNED") return `Unassigned charge recorded: <b>${h(event.description)}</b> · ${money(event.totalCents ?? event.amountMinor)}`;
-  if (event.type === "SETTLEMENT_RECORDED") return `Settlement recorded: <b>${h(memberName(event.fromId))}</b> → <b>${h(memberName(event.toId))}</b> · ${money(event.cents)}`;
-  if (event.type === "SETTLEMENT_ASSERTED") return `Payment claim pending: <b>${h(memberName(event.fromMemberId))}</b> → <b>${h(memberName(event.toMemberId))}</b> · ${money(event.amountMinor)}`;
-  if (event.type === "SETTLEMENT_CONFIRMED") return `Payment confirmed for ${h(memberName(event.confirmedByMemberId))}.`;
-  if (event.type === "SESSION_CLOSED_PROVISIONAL") return `<b>A provisional close was recorded.</b> ${h(event.reason)}`;
-  if (event.type === "SESSION_CLOSED_FINAL") return "<b>The journey was finally closed.</b>";
-  if (event.type === "SESSION_ARCHIVED") return `<b>The journey was archived.</b>${event.provisional ? " Open balances remained." : " The account was balanced."}`;
-  if (event.type === "EVIDENCE_ATTACHED") return `${event.note ? `Photo: <b>${h(event.note)}</b>` : "Photo attached"}<span class="evidence-thumb"><img data-evidence="${h(event.evidenceId)}" alt="${h(event.note ?? "Attached photo")}"></span>`;
-  if (event.type === "SESSION_CREATED") return `<b>${h(event.name)}</b> opened a ledger in ${h(event.baseCurrency)}`;
+  if (event.type === "MEMBER_ADDED") return t("event.memberAdded", { name: h(event.name) });
+  if (event.type === "MEMBER_INVITED") return t("event.memberInvited", { name: h(event.name), role: tOptional(`role.${event.role}`) ?? h(event.role) });
+  if (event.type === "EXPENSE_RECORDED") return t("event.expense", { what: h(event.description), amount: money(event.totalCents ?? event.baseAmountMinor ?? event.amountMinor) });
+  if (event.type === "EXPENSE_UNASSIGNED") return t("event.unassigned", { what: h(event.description), amount: money(event.totalCents ?? event.amountMinor) });
+  if (event.type === "SETTLEMENT_RECORDED") return t("event.settlementRecorded", { from: h(memberName(event.fromId)), to: h(memberName(event.toId)), amount: money(event.cents) });
+  if (event.type === "SETTLEMENT_ASSERTED") return t("event.settlementAsserted", { from: h(memberName(event.fromMemberId)), to: h(memberName(event.toMemberId)), amount: money(event.amountMinor) });
+  if (event.type === "SETTLEMENT_CONFIRMED") return t("event.settlementConfirmed", { name: h(memberName(event.confirmedByMemberId)) });
+  if (event.type === "SESSION_CLOSED_PROVISIONAL") return t("event.closedProvisional", { reason: h(event.reason) });
+  if (event.type === "SESSION_CLOSED_FINAL") return t("event.closedFinal");
+  if (event.type === "SESSION_ARCHIVED") return `${t("event.archived")}${event.provisional ? t("event.archived.open") : t("event.archived.balanced")}`;
+  if (event.type === "EVIDENCE_ATTACHED") return `${event.note ? t("event.photoNamed", { note: h(event.note) }) : t("event.photo")}<span class="evidence-thumb"><img data-evidence="${h(event.evidenceId)}" alt="${h(event.note ?? t("event.photoAlt"))}"></span>`;
+  if (event.type === "SESSION_CREATED") return t("event.sessionCreated", { name: h(event.name), currency: h(event.baseCurrency) });
+  // An event type without its own phrasing still reads as something, rather than
+  // as a raw constant: the humanised type is the last resort, not the default.
+  const named = tOptional(`event.${event.type}`);
+  if (named) return h(named);
   const described = event.type.replaceAll("_", " ").toLowerCase();
   return h(described.endsWith(" recorded") ? described : `${described} recorded`);
 }
+
 
 function eventRow(event) {
   const icon = { MEMBER_ADDED: "◉", MEMBER_INVITED: "◉", EXPENSE_RECORDED: "⌕", SETTLEMENT_RECORDED: "♢", SETTLEMENT_ASSERTED: "♢", SETTLEMENT_CONFIRMED: "♢", SESSION_ARCHIVED: "▣", SESSION_CLOSED_FINAL: "▣", SESSION_CLOSED_PROVISIONAL: "▣" }[event.type] || "·";
