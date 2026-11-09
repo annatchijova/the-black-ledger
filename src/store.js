@@ -13,6 +13,10 @@ let accessContext = { role: "organizer", memberId: null };
 // derivation stays a faithful function of the events, and a reader can still see
 // which values the server supplied.
 let serverState = null;
+// Only ever present for the organizer, and only carried alongside the derived
+// state rather than inside it, for the same reason serverState is kept apart:
+// no event in the log produces it.
+let roomCode = null;
 const eventBaseCurrency = (events) => events.find((event) => event.type === "SESSION_CREATED")?.baseCurrency ?? "USD";
 
 async function request(path, options) {
@@ -36,6 +40,7 @@ export async function loadLedger() {
       const response = await request(api(sessionId));
       accessContext = response.access ?? { role: "organizer", memberId: null };
       serverState = response.state ?? null;
+      roomCode = response.roomCode ?? null;
       let events = parseEventLog(response.events, eventBaseCurrency(response.events));
       const oldRaw = invite ? null : localStorage.getItem(LEGACY_KEY);
       if (oldRaw !== null && accessContext.role === "organizer") {
@@ -59,10 +64,16 @@ export async function loadLedger() {
       localStorage.removeItem(SESSION_KEY);
       localStorage.removeItem(TOKEN_KEY);
       sessionId = null;
+      roomCode = null;
     }
   }
   const oldRaw = localStorage.getItem(LEGACY_KEY);
-  const legacy = oldRaw === null ? [] : parseEventLog(JSON.parse(oldRaw));
+  // A fresh browser with no prior local data gets no silent session: the
+  // caller renders the create-or-join gate instead. A browser that already
+  // has pre-session local ledger data keeps the old silent-migration path, so
+  // nobody's existing history disappears behind a gate they never asked for.
+  if (oldRaw === null) return null;
+  const legacy = parseEventLog(JSON.parse(oldRaw));
   const created = await request(api(), { method: "POST", body: JSON.stringify({ name: "The Black Ledger", baseCurrency: "USD" }) });
   localStorage.setItem(SESSION_KEY, created.sessionId);
   localStorage.setItem(TOKEN_KEY, created.accessToken);
@@ -77,6 +88,26 @@ export async function loadLedger() {
   return parseEventLog(events, eventBaseCurrency(events));
 }
 
+// Create a brand-new room: a title and the creator's own name. The server
+// mints a standing, reusable room code alongside the usual organizer access
+// token, and adds the creator as the first member so they can actually take
+// part in the splitting, not just administer it from the outside.
+export async function createRoom(title, creatorName) {
+  const created = await request(api(), { method: "POST", body: JSON.stringify({ name: title, baseCurrency: "USD", creatorName }) });
+  localStorage.setItem(SESSION_KEY, created.sessionId);
+  localStorage.setItem(TOKEN_KEY, created.accessToken);
+  return loadLedger();
+}
+
+// Join an existing room by its standing code, picking your own display name
+// on the way in — unlike a named invite, nobody has to add you first.
+export async function joinRoomByCode(code, name) {
+  const joined = await request("/api/rooms/join", { method: "POST", body: JSON.stringify({ code, name }) });
+  localStorage.setItem(SESSION_KEY, joined.sessionId);
+  localStorage.setItem(TOKEN_KEY, joined.accessToken);
+  return loadLedger();
+}
+
 function migrateEvents(event) {
   if (event.type !== "SETTLEMENT_RECORDED") return [event];
   const settlementId = `legacy_${event.id}`;
@@ -88,6 +119,7 @@ function migrateEvents(event) {
 
 export function getAccessContext() { return { ...accessContext }; }
 export function getServerState() { return serverState; }
+export function getRoomCode() { return roomCode; }
 
 export async function appendEvent(currentEvents, type, fields) {
   const sessionId = localStorage.getItem(SESSION_KEY);

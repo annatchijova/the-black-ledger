@@ -47,6 +47,18 @@ for (const column of ["provider_amount_value TEXT", "provider_currency TEXT", "p
   }
 }
 
+// Unlike invite_codes and session_tokens, a room code is meant to be read back
+// and re-shared for as long as the session is open — it is a standing "room
+// number," not a one-time credential — so it is stored in cleartext rather
+// than hashed. Its blast radius is bounded: it only lets someone add
+// themselves as a new member and see their own balance, never move money; the
+// PayPal payout target stays pinned to a specific pre-configured member
+// regardless of who has joined.
+if (!db.prepare("PRAGMA table_info(sessions)").all().some((column) => column.name === "room_code")) {
+  db.exec("ALTER TABLE sessions ADD COLUMN room_code TEXT");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS sessions_room_code ON sessions(room_code) WHERE room_code IS NOT NULL");
+}
+
 // Evidence is served back to participants from this origin, so the stored type
 // is an allowlist rather than whatever the uploader claimed. Anything outside it
 // could be served as active content on the app's own origin.
@@ -80,6 +92,7 @@ function newJoinCode() {
 }
 
 const normalizeJoinCode = (value) => String(value ?? "").toUpperCase().replace(/[^0-9A-Z]/g, "").replaceAll("I", "1").replaceAll("L", "1").replaceAll("O", "0");
+const formatJoinCode = (value) => (value && value.length === 8 ? `${value.slice(0, 4)}-${value.slice(4)}` : value);
 
 // Counted before the code is looked at, so a wrong guess costs the same as a
 // right one and the ceiling cannot be sidestepped by only sending valid-looking
@@ -289,17 +302,54 @@ async function route(req, res) {
     const accessToken = randomBytes(32).toString("base64url");
     const currency = String(body.baseCurrency ?? "USD").toUpperCase();
     const createdAt = new Date().toISOString();
+    const creatorName = typeof body.creatorName === "string" ? body.creatorName.trim().slice(0, 80) : "";
     const createEvent = { id: randomUUID().replaceAll("-", ""), at: createdAt, type: "SESSION_CREATED", sessionId, name: body.name, baseCurrency: currency };
     parseEventLog([createEvent], currency); deriveLedger([createEvent], { baseCurrency: currency });
-    db.prepare("INSERT INTO sessions(id, base_currency, created_at) VALUES (?, ?, ?)").run(sessionId, currency, createdAt);
-    db.prepare("INSERT INTO session_tokens(token_hash, session_id, role, created_at) VALUES (?, ?, 'organizer', ?)").run(sha(accessToken), sessionId, createdAt);
+    let roomCode;
+    for (let attempt = 0; ; attempt += 1) {
+      roomCode = newJoinCode();
+      try {
+        db.prepare("INSERT INTO sessions(id, base_currency, created_at, room_code) VALUES (?, ?, ?, ?)").run(sessionId, currency, createdAt, normalizeJoinCode(roomCode));
+        break;
+      } catch (error) {
+        if (!String(error.message).includes("room_code") || attempt >= 4) throw error;
+      }
+    }
+    const creatorMemberId = creatorName ? randomUUID().replaceAll("-", "") : null;
+    db.prepare("INSERT INTO session_tokens(token_hash, session_id, role, member_id, created_at) VALUES (?, ?, 'organizer', ?, ?)").run(sha(accessToken), sessionId, creatorMemberId, createdAt);
     const response = append(sessionId, createEvent, `create:${sessionId}`);
-    return send(res, 201, { sessionId, accessToken, ...response });
+    let latest = response, memberEvent = null;
+    if (creatorMemberId) {
+      const proposedMemberEvent = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "MEMBER_ADDED", memberId: creatorMemberId, name: creatorName };
+      latest = append(sessionId, proposedMemberEvent, `create-member:${sessionId}`);
+      memberEvent = latest.event;
+    }
+    return send(res, 201, { sessionId, accessToken, roomCode, memberId: creatorMemberId, memberEvent, ...response, state: latest.state, headHash: latest.headHash });
+  }
+  if (req.method === "POST" && url.pathname === "/api/rooms/join") {
+    const body = await readJson(req, 4_000);
+    reserveJoinAttempt(clientSource(req));
+    const code = normalizeJoinCode(body.code);
+    const name = typeof body.name === "string" ? body.name.trim().slice(0, 80) : "";
+    // Same anti-enumeration discipline as /api/join: one message for every
+    // failure, so a wrong code and a right code with a bad name cost a prober
+    // the same information.
+    const refuse = (message = "That room code is not valid. Ask whoever created the room for it.") => send(res, 404, { error: message });
+    if (code.length !== 8) return refuse();
+    if (!name) return refuse("Enter a name to join with.");
+    const session = db.prepare("SELECT id, base_currency FROM sessions WHERE room_code = ?").get(code);
+    if (!session) return refuse();
+    const memberId = randomUUID().replaceAll("-", "");
+    const accessToken = randomBytes(32).toString("base64url");
+    const event = { id: randomUUID().replaceAll("-", ""), at: new Date().toISOString(), type: "MEMBER_ADDED", memberId, name };
+    const created = append(session.id, event, `room-join:${session.id}:${memberId}`);
+    db.prepare("INSERT INTO session_tokens(token_hash, session_id, role, member_id, created_at) VALUES (?, ?, 'member', ?, ?)").run(sha(accessToken), session.id, memberId, event.at);
+    return send(res, 200, { sessionId: session.id, accessToken, role: "member", memberId, event: created.event, state: created.state });
   }
   const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,100})(?:\/(events|evidence|export|analysis\/(?:receipt|scenario)|simulate|invitations|carry-debt|evidence\/[a-zA-Z0-9_-]{1,100}|payments(?:\/[A-Z0-9-]+\/(?:capture|cancel|reconcile))?))?$/.exec(url.pathname);
   if (match) {
     const [, sessionId, resource] = match;
-    const session = db.prepare("SELECT id, base_currency FROM sessions WHERE id = ?").get(sessionId);
+    const session = db.prepare("SELECT id, base_currency, room_code FROM sessions WHERE id = ?").get(sessionId);
     if (!session) return send(res, 404, { error: "Session not found." });
     const bearer = /^Bearer ([A-Za-z0-9_-]{32,100})$/.exec(req.headers.authorization ?? "")?.[1];
     const access = bearer ? db.prepare("SELECT role, member_id FROM session_tokens WHERE token_hash = ? AND session_id = ? AND revoked_at IS NULL").get(sha(bearer), sessionId) : null;
@@ -312,7 +362,7 @@ async function route(req, res) {
     if (req.method === "GET" && (!resource || resource === "events")) {
       const { events, headHash } = getEvents(sessionId); const ledger = deriveLedger(events, { baseCurrency: session.base_currency });
       const visibleEvents = events.map((event) => event.type === "SURPRISE_GIFT_RECORDED" && event.recipientMemberId === access.member_id ? { ...event, privateDescription: "[hidden from recipient]" } : event);
-      return send(res, 200, { sessionId, baseCurrency: session.base_currency, access: { role: access.role, memberId: access.member_id }, events: visibleEvents, headHash, state: publicState(ledger, access) });
+      return send(res, 200, { sessionId, baseCurrency: session.base_currency, roomCode: access.role === "organizer" ? formatJoinCode(session.room_code) : undefined, access: { role: access.role, memberId: access.member_id }, events: visibleEvents, headHash, state: publicState(ledger, access) });
     }
     if (req.method === "GET" && resource === "export") {
       if (access.role !== "organizer") return send(res, 403, { error: "Only the organizer can export the complete evidence package." });

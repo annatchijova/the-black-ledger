@@ -1,7 +1,7 @@
 import { deriveLedger, findPossibleDuplicates, formatMoney, parseAmountToMinor, SUPPORTED_CURRENCIES, settleUp } from "./domain.js";
 import { deriveNarrativeEvents } from "./domain/narrative.js";
 import { t, tOptional, plural, currentLanguage, setLanguage } from "./i18n.js";
-import { appendEvent, exportLedger, loadLedger, takeAppendWarnings, getAccessContext, getServerState } from "./store.js";
+import { appendEvent, exportLedger, loadLedger, takeAppendWarnings, getAccessContext, getServerState, createRoom, joinRoomByCode, getRoomCode } from "./store.js";
 
 const view = document.querySelector("#view");
 const storageError = document.querySelector("#storage-error");
@@ -134,8 +134,8 @@ function membersPage(current) {
   return `${header(t("members.title"), t("members.subtitle"), t("members.eyebrow"))}
     <section class="feature-card mirror-card"><div class="feature-symbol feature-illustrated"><img class="chamber-art" src="/assets/broken-mirror.png" alt=""></div><div><div class="eyebrow">${t("members.card.eyebrow")}</div><h2>${t("members.card.title")}</h2><p>${t("members.card.body")}</p></div></section>
     ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="member-form"><label for="member-name">${t("members.add.label")}</label><div class="input-row"><input id="member-name" name="name" maxlength="48" placeholder="${t("members.add.placeholder")}" required autocomplete="off"><button class="button button-gold" type="submit">${t("members.add.cta")} <span>↗</span></button></div><small>${t("members.add.hint")}</small></form>` : ""}
-    ${!current.archived && canAdmin ? `<form class="form-panel inline-form" id="invite-form"><label for="invite-name">${t("members.invite.label")}</label><div class="input-row"><input id="invite-name" name="name" maxlength="80" placeholder="${t("members.invite.placeholder")}" required><select name="role"><option value="member">${t("members.invite.member")}</option><option value="witness">${t("members.invite.witness")}</option></select><button class="button button-quiet" type="submit">${t("members.invite.cta")}</button></div><output id="invite-link" aria-live="polite"></output></form>` : ""}
-    ${!current.archived ? `<form class="form-panel inline-form" id="join-code-form"><label for="join-code">${t("members.join.label")}</label><div class="input-row"><input id="join-code" name="code" maxlength="20" autocomplete="off" spellcheck="false" placeholder="ABCD-2345"><button class="button button-quiet" type="submit">${t("members.join.cta")}</button></div><p class="field-hint">${t("members.join.hint")}</p><output id="join-code-result" aria-live="polite"></output></form>` : ""}
+    ${canAdmin && getRoomCode() ? `<section class="form-panel room-code-panel"><div class="eyebrow">${t("members.roomcode.label")}</div><div class="room-code-display"><strong id="room-code-value">${h(getRoomCode())}</strong><button class="button button-quiet" type="button" id="room-code-copy">${t("members.roomcode.copy")}</button></div><p class="field-hint">${t("members.roomcode.body")}</p></section>` : ""}
+    ${!current.archived ? `<form class="form-panel inline-form" id="join-code-form"><label for="join-code">${t("members.join.label")}</label><div class="input-row"><input id="join-code" name="code" maxlength="20" autocomplete="off" spellcheck="false" placeholder="ABCD-2345" required><input id="join-name" name="name" maxlength="80" placeholder="${t("members.join.namePlaceholder")}" required><button class="button button-quiet" type="submit">${t("members.join.cta")}</button></div><p class="field-hint">${t("members.join.hint")}</p><output id="join-code-result" aria-live="polite"></output></form>` : ""}
     ${!current.archived && canAdmin && activeMembers.length ? `<form class="form-panel inline-form" id="group-form"><label for="group-name">${t("members.group.label")}</label><div class="input-row"><input id="group-name" name="name" maxlength="80" placeholder="${t("members.group.placeholder")}" required><button class="button button-quiet" type="submit">${t("members.group.cta")}</button></div><fieldset class="beneficiary-fieldset"><legend>${t("members.group.legend")}</legend><div class="check-grid">${activeMembers.map((member) => `<label class="check-row"><input type="checkbox" name="groupMember" value="${h(member.id)}"><span>${h(member.name)}</span></label>`).join("")}</div></fieldset></form>` : ""}
     ${!current.archived && canAdmin ? `<form class="form-panel agreement-form" id="agreement-form"><div class="eyebrow">${t("members.agreement.eyebrow")}</div><h2>${t("members.agreement.title")}</h2><p>${t("members.agreement.body")}</p>${agreementFields.map(([category, label, placeholder]) => `<label>${label}<textarea name="${category}" maxlength="500" rows="2" placeholder="${placeholder}">${h(agreement.get(category)?.text ?? "")}</textarea></label>`).join("")}<output data-action-error role="alert" hidden></output><button class="button button-quiet" type="submit">${t("members.agreement.cta")}</button></form>` : ""}
     ${agreement.size ? `<section class="panel list-panel"><div class="section-title"><div><div class="eyebrow">${t("members.current.eyebrow")}</div><h2>${t("members.current.title")}</h2></div><span class="count">${t("members.current.count", { count: agreement.size })}</span></div><div class="agreement-list">${agreementFields.filter(([category]) => agreement.has(category)).map(([category, label]) => `<article><b>${label}</b><p>${h(agreement.get(category).text)}</p><small>${t("members.current.recorded", { when: eventDate(agreement.get(category).at) })}</small></article>`).join("")}</div></section>` : ""}
@@ -383,42 +383,22 @@ function bindPage(current) {
     } catch (error) { resultNode.hidden = false; resultNode.textContent = error.message; }
   });
 
-  document.querySelector("#invite-form")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try {
-      const data = new FormData(event.currentTarget);
-      const sessionId = localStorage.getItem("the-black-ledger.session.v1");
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/invitations`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${localStorage.getItem("the-black-ledger.access.v1")}` }, body: JSON.stringify({ name: data.get("name"), role: data.get("role") }) });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? t("msg.could.not.create.invite"));
-      const link = `${location.origin}${result.invitePath}`;
-      try { await navigator.clipboard?.writeText(link); } catch { /* The visible invite path remains available to copy manually. */ }
-      events = await loadLedger(); render();
-      const output = document.querySelector("#invite-link");
-      // The code is shown once. It is stored hashed, so it cannot be read back
-      // out later and a lost one is replaced by inviting again.
-      if (output) output.textContent = result.joinCode ? `Code ${result.joinCode} — say it out loud, or send the link: ${link}` : link;
-      showToast(result.joinCode ? `Join code ${result.joinCode}. It works once, for 24 hours.` : t("msg.invite.link.created.share"));
-    } catch (error) { showToast(error.message); }
+  document.querySelector("#room-code-copy")?.addEventListener("click", async () => {
+    const code = document.querySelector("#room-code-value")?.textContent ?? "";
+    try { await navigator.clipboard?.writeText(code); showToast(t("members.roomcode.copied")); } catch { /* Visible and selectable either way. */ }
   });
 
   document.querySelector("#join-code-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const field = event.target.elements.code;
+    const data = new FormData(event.currentTarget);
     const result = document.querySelector("#join-code-result");
     const say = (text) => { if (result) { result.hidden = false; result.textContent = text; } };
     try {
-      const response = await fetch("/api/join", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: field.value }) });
-      const claim = await response.json();
-      if (!response.ok) throw new Error(claim.error ?? t("msg.that.code.could.not"));
-      localStorage.setItem("the-black-ledger.session.v1", claim.sessionId);
-      localStorage.setItem("the-black-ledger.access.v1", claim.accessToken);
-      field.value = "";
+      events = await joinRoomByCode(String(data.get("code") ?? ""), String(data.get("name") ?? ""));
       say("");
-      events = await loadLedger();
       route = "home";
       render();
-      showToast(claim.role === "witness" ? t("msg.you.joined.as.a") : t("msg.you.joined.the.ledger"));
+      showToast(t("msg.you.joined.the.ledger"));
     } catch (error) { say(error.message); }
   });
 
@@ -839,7 +819,9 @@ function applyShellTranslations() {
 
 function render() {
   applyShellTranslations();
+  if (events === null) return renderGate();
   if (!events) return;
+  document.querySelector(".rail").hidden = false;
   const current = ledger();
   document.querySelector("#export-button").hidden = getAccessContext().role !== "organizer";
   if (!routes.has(route)) route = "home";
@@ -861,6 +843,68 @@ function render() {
     const blockers = current.closureBlockers;
     document.querySelector("#archive-balance-note").textContent = blockers.length ? `This will be a provisional close. ${blockers.map((item) => item.message).join(" ")}` : t("msg.all.records.are.resolved");
     dialog.showModal();
+  });
+}
+
+// Shown before any session exists on this device: no chamber to navigate to
+// yet, so the rail stays hidden rather than linking to pages with nothing
+// behind them.
+function renderGate() {
+  document.querySelector(".rail").hidden = true;
+  document.querySelectorAll(".nav-link").forEach((link) => link.classList.remove("active"));
+  view.innerHTML = `
+    <div class="view-heading"><div data-build-in><div class="eyebrow">${t("gate.eyebrow")}</div><h1>${t("gate.title")}</h1><p>${t("gate.body")}</p></div></div>
+    <div class="content-grid">
+      <form class="form-panel" id="gate-create-form">
+        <div class="eyebrow">${t("gate.create.label")}</div>
+        <div class="field-grid">
+          <label>${t("gate.create.label")}<input name="title" maxlength="80" placeholder="${t("gate.create.titlePlaceholder")}" required></label>
+          <label>${t("gate.create.namePlaceholder")}<input name="creatorName" maxlength="80" placeholder="${t("gate.create.namePlaceholder")}" required></label>
+        </div>
+        <output data-action-error role="alert" hidden></output>
+        <button class="button button-gold" type="submit">${t("gate.create.cta")} <span>↗</span></button>
+      </form>
+      <form class="form-panel" id="gate-join-form">
+        <div class="eyebrow">${t("gate.join.label")}</div>
+        <div class="field-grid">
+          <label>${t("gate.join.label")}<input name="code" maxlength="20" autocomplete="off" spellcheck="false" placeholder="${t("gate.join.codePlaceholder")}" required></label>
+          <label>${t("gate.join.namePlaceholder")}<input name="name" maxlength="80" placeholder="${t("gate.join.namePlaceholder")}" required></label>
+        </div>
+        <output data-action-error role="alert" hidden></output>
+        <button class="button button-quiet" type="submit">${t("gate.join.cta")}</button>
+      </form>
+    </div>`;
+  const heading = view.querySelector(".view-heading");
+  if (heading) requestAnimationFrame(() => requestAnimationFrame(() => heading.classList.add("on")));
+
+  document.querySelector("#gate-create-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const errorOutput = form.querySelector("[data-action-error]");
+    const data = new FormData(form);
+    const title = String(data.get("title") ?? "").trim();
+    const creatorName = String(data.get("creatorName") ?? "").trim();
+    const fail = (message) => { if (errorOutput) { errorOutput.hidden = false; errorOutput.textContent = message; } };
+    if (!title) return fail(t("gate.error.title"));
+    if (!creatorName) return fail(t("gate.error.creatorName"));
+    const submit = form.querySelector("button[type=submit]"); if (submit) submit.disabled = true;
+    try { events = await createRoom(title, creatorName); route = "home"; render(); showToast(t("msg.the.ledger.was.refreshed")); }
+    catch (error) { fail(error.message); if (submit) submit.disabled = false; }
+  });
+
+  document.querySelector("#gate-join-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const errorOutput = form.querySelector("[data-action-error]");
+    const data = new FormData(form);
+    const code = String(data.get("code") ?? "").trim();
+    const name = String(data.get("name") ?? "").trim();
+    const fail = (message) => { if (errorOutput) { errorOutput.hidden = false; errorOutput.textContent = message; } };
+    if (!code) return fail(t("gate.error.code"));
+    if (!name) return fail(t("gate.error.joinName"));
+    const submit = form.querySelector("button[type=submit]"); if (submit) submit.disabled = true;
+    try { events = await joinRoomByCode(code, name); route = "home"; render(); showToast(t("msg.you.joined.the.ledger")); }
+    catch (error) { fail(error.message); if (submit) submit.disabled = false; }
   });
 }
 
