@@ -77,7 +77,8 @@ async function commitFromForm(form, type, fields, successMessage) {
 }
 
 function header(title, subtitle, eyebrow = "THE LEDGER") {
-  return `<div class="view-heading"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div><span class="heading-mark" aria-hidden="true">✳</span></div>`;
+  const chamber = ({ home: "ledger", members: "mirror", expenses: "telephone", history: "memory", payments: "elixir", verdict: "verdict" })[route] ?? "ledger";
+  return `<div class="view-heading"><div data-build-in><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div><svg class="heading-mark" data-stamp viewBox="0 0 40 40" aria-hidden="true" focusable="false"><use href="#chamber-${chamber}"></use></svg></div>`;
 }
 
 function statusPill(current) {
@@ -121,7 +122,7 @@ function balanceBreakdown(member, current) {
 }
 
 function emptyState(title, body, href, action) {
-  return `<div class="empty-state"><span aria-hidden="true">◌</span><b>${title}</b><p>${body}</p><a class="text-button" href="${href}">${action} ↗</a></div>`;
+  return `<div class="empty-state"><span aria-hidden="true"><svg class="empty-mark" viewBox="0 0 40 40"><use href="#chamber-ledger"></use></svg></span><b>${title}</b><p>${body}</p><a class="text-button" href="${href}">${action} ↗</a></div>`;
 }
 
 function membersPage(current) {
@@ -845,6 +846,8 @@ function render() {
   document.querySelectorAll(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.route === route));
   const pages = { home: homePage, members: membersPage, expenses: expensePage, history: historyPage, payments: paymentPage, verdict: verdictPage };
   view.innerHTML = pages[route](current);
+  const heading = view.querySelector(".view-heading");
+  if (heading) requestAnimationFrame(() => requestAnimationFrame(() => heading.classList.add("on")));
   bindPage(current);
   hydrateEvidenceImages();
   if (route === "history" && location.hash.startsWith("#history/")) {

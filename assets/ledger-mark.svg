@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="The Black Ledger seal">
+  <circle cx="24" cy="24" r="22" fill="#1b140d" stroke="#c3a66c" stroke-width="1"/>
+  <circle cx="24" cy="24" r="18.5" fill="none" stroke="#7d2a28" stroke-width="5.4"/>
+  <circle cx="24" cy="24" r="18.5" fill="none" stroke="#ddc18a" stroke-opacity=".22" stroke-width="1"/>
+  <g transform="translate(24 24) scale(1.55) translate(-20 -20)" stroke="#f1e2bd" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 19.25c-2.6-3.8-7.25-2.55-7.25 1.05 0 2.15 3.7 3.65 7.25 6.7 3.55-3.05 7.25-4.55 7.25-6.7 0-3.6-4.65-4.85-7.25-1.05Z"/>
+    <path d="M20 18.1v4.4" stroke="#e8746d" stroke-width="2.2"/>
+  </g>
+</svg>
