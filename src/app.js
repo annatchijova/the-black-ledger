@@ -50,7 +50,7 @@ function showToast(message) {
 }
 
 async function commit(type, fields, successMessage) {
-  try { events = await appendEvent(events, type, fields); const warnings = takeAppendWarnings(); render(); showToast(warnings.length ? `Possible duplicate: ${warnings.map((item) => item.reason).join("; ")}. Check the record; nothing was removed.` : successMessage); return true; }
+  try { events = await appendEvent(events, type, fields); const warnings = takeAppendWarnings(); render(); markFresh(); showToast(warnings.length ? `Possible duplicate: ${warnings.map((item) => item.reason).join("; ")}. Check the record; nothing was removed.` : successMessage); return true; }
   catch (error) {
     try { events = await loadLedger(); render(); } catch (loadError) { storageError.hidden = false; storageError.textContent = loadError.message; document.querySelector("#application").hidden = true; }
     showToast(error.message); return false;
@@ -66,6 +66,7 @@ async function commitFromForm(form, type, fields, successMessage) {
     events = await appendEvent(events, type, fields);
     const warnings = takeAppendWarnings();
     render();
+    markFresh();
     showToast(warnings.length ? `Possible duplicate: ${warnings.map((item) => item.reason).join("; ")}. Check the record; nothing was removed.` : successMessage);
     return true;
   } catch (error) {
@@ -817,6 +818,109 @@ function applyShellTranslations() {
   if (toggle) toggle.textContent = currentLanguage().toUpperCase();
 }
 
+// Motion layer. Decorative only: it reads the DOM after a render and never
+// produces, alters, or stands in for a recorded value. The ledger's confirmed
+// event remains the only success signal; every effect here honors
+// prefers-reduced-motion and degrades to a plain, fully visible page.
+const reducedMotion = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+const finePointer = typeof matchMedia === "function" && matchMedia("(hover: hover) and (pointer: fine)").matches;
+let stagedRoute = null;
+
+// Entering a chamber stages its sections and rows in order; re-rendering the
+// same chamber after a write only settles, so a form submit does not replay
+// the whole arrival.
+function stageChamber() {
+  const changed = stagedRoute !== route;
+  stagedRoute = route;
+  view.classList.remove("staged", "settled");
+  void view.offsetWidth; // restart the keyframes on a class re-added in the same frame
+  view.classList.add(changed ? "staged" : "settled");
+  let index = 0;
+  for (const child of view.children) if (!child.classList.contains("view-heading")) child.style.setProperty("--i", String(Math.min(index++, 9)));
+  for (const list of view.querySelectorAll(".member-list,.event-list,.expense-list,.transfer-list,.commitment-list,.budget-list,.recurring-list,.agreement-list,.balance-breakdown ol,.gate-how-steps")) {
+    let n = 0;
+    for (const row of list.children) row.style.setProperty("--i", String(Math.min(n++, 14)));
+  }
+}
+
+// After a successful append, the row that now holds the newest event darkens
+// at its edge and settles. The amount itself is never obscured or animated.
+function markFresh() {
+  const last = events?.at(-1);
+  if (!last) return;
+  const row = last.type === "EXPENSE_RECORDED" ? view.querySelector(".expense-list .expense-row")
+    : last.type === "MEMBER_ADDED" ? view.querySelector(".full-list .member-row:last-child")
+    : document.getElementById(`event-${last.id}`);
+  row?.classList.add("fresh");
+}
+
+// One dry imprint of the seal when a ledger is archived. It plays beside the
+// commit, not as its evidence: the read-only state comes from the event.
+function pressSeal() {
+  if (reducedMotion) return;
+  const imprint = document.createElement("div");
+  imprint.className = "seal-imprint";
+  imprint.setAttribute("aria-hidden", "true");
+  imprint.innerHTML = '<svg viewBox="0 0 48 48"><use href="#brand-seal"></use></svg>';
+  imprint.addEventListener("animationend", (event) => { if (event.target === imprint) imprint.remove(); });
+  document.body.append(imprint);
+}
+
+// Dust in the lamp light, and a pool of light that follows a fine pointer
+// across the cards. Touch devices and reduced-motion readers get neither.
+function igniteAtmosphere() {
+  if (reducedMotion) return;
+  const motes = document.createElement("div");
+  motes.className = "motes";
+  motes.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 9; i++) {
+    const mote = document.createElement("i");
+    mote.className = "mote";
+    mote.style.setProperty("--x", `${(i * 11.3 + 7) % 100}%`);
+    mote.style.setProperty("--d", `${14 + ((i * 3.7) % 11)}s`);
+    mote.style.setProperty("--delay", `${-((i * 2.9) % 14)}s`);
+    mote.style.setProperty("--s", `${2 + (i % 3)}px`);
+    mote.style.setProperty("--sway", `${(i % 2 ? 1 : -1) * (12 + ((i * 5) % 20))}px`);
+    motes.append(mote);
+  }
+  document.body.append(motes);
+  if (!finePointer) return;
+  const lamp = document.createElement("div");
+  lamp.className = "lamp";
+  lamp.setAttribute("aria-hidden", "true");
+  document.body.append(lamp);
+  const TILT = ".stat-card,.feature-card";
+  const LIT = ".stat-card,.panel,.form-panel,.feature-card,.closing-strip,.sealed-banner";
+  let x = 0, y = 0, queued = false;
+  document.addEventListener("pointermove", (event) => {
+    x = event.clientX; y = event.clientY;
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      lamp.style.transform = `translate3d(${x}px,${y}px,0)`;
+      lamp.classList.add("on");
+      const card = document.elementFromPoint(x, y)?.closest(LIT);
+      if (!card) return;
+      const rect = card.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const px = (x - rect.left) / rect.width;
+      const py = (y - rect.top) / rect.height;
+      card.style.setProperty("--mx", `${(px * 100).toFixed(1)}%`);
+      card.style.setProperty("--my", `${(py * 100).toFixed(1)}%`);
+      if (card.matches(TILT)) {
+        card.classList.add("tilt");
+        card.style.transform = `perspective(900px) rotateX(${((py - 0.5) * -4).toFixed(2)}deg) rotateY(${((px - 0.5) * 5).toFixed(2)}deg) translateY(-2px)`;
+      }
+    });
+  }, { passive: true });
+  document.addEventListener("pointerout", (event) => {
+    const card = event.target instanceof Element ? event.target.closest(TILT) : null;
+    if (card && !(event.relatedTarget instanceof Node && card.contains(event.relatedTarget))) { card.classList.remove("tilt"); card.style.transform = ""; }
+  }, { passive: true });
+  document.documentElement.addEventListener("pointerleave", () => lamp.classList.remove("on"));
+}
+
 function render() {
   applyShellTranslations();
   if (events === null) return renderGate();
@@ -828,6 +932,7 @@ function render() {
   document.querySelectorAll(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.route === route));
   const pages = { home: homePage, members: membersPage, expenses: expensePage, history: historyPage, payments: paymentPage, verdict: verdictPage };
   view.innerHTML = pages[route](current);
+  stageChamber();
   const heading = view.querySelector(".view-heading");
   if (heading) requestAnimationFrame(() => requestAnimationFrame(() => heading.classList.add("on")));
   bindPage(current);
@@ -854,6 +959,15 @@ function renderGate() {
   document.querySelectorAll(".nav-link").forEach((link) => link.classList.remove("active"));
   view.innerHTML = `
     <div class="view-heading"><div data-build-in><div class="eyebrow">${t("gate.eyebrow")}</div><h1>${t("gate.title")}</h1><p>${t("gate.body")}</p></div></div>
+    <section class="hero-card gate-hero"><div class="hero-copy"><h2>${t("gate.hook")}</h2><span class="status-pill gate-paypal-pill"><i></i>${t("gate.paypal")}</span></div></section>
+    <section class="panel gate-how">
+      <div class="section-title"><div><div class="eyebrow">${t("gate.how.eyebrow")}</div><h2>${t("gate.how.title")}</h2></div></div>
+      <ol class="gate-how-steps">
+        <li><svg class="heading-mark" viewBox="0 0 40 40" aria-hidden="true" focusable="false"><use href="#chamber-ledger"></use></svg><div><b>${t("gate.how.step1.title")}</b><p>${t("gate.how.step1.body")}</p></div></li>
+        <li><svg class="heading-mark" viewBox="0 0 40 40" aria-hidden="true" focusable="false"><use href="#chamber-telephone"></use></svg><div><b>${t("gate.how.step2.title")}</b><p>${t("gate.how.step2.body")}</p></div></li>
+        <li><svg class="heading-mark" viewBox="0 0 40 40" aria-hidden="true" focusable="false"><use href="#chamber-verdict"></use></svg><div><b>${t("gate.how.step3.title")}</b><p>${t("gate.how.step3.body")}</p></div></li>
+      </ol>
+    </section>
     <div class="content-grid">
       <form class="form-panel" id="gate-create-form">
         <div class="eyebrow">${t("gate.create.label")}</div>
@@ -874,6 +988,7 @@ function renderGate() {
         <button class="button button-quiet" type="submit">${t("gate.join.cta")}</button>
       </form>
     </div>`;
+  stageChamber();
   const heading = view.querySelector(".view-heading");
   if (heading) requestAnimationFrame(() => requestAnimationFrame(() => heading.classList.add("on")));
 
@@ -915,8 +1030,12 @@ document.querySelector("#main-nav").addEventListener("click", (event) => {
 window.addEventListener("hashchange", () => { route = location.hash.slice(1).split("/")[0] || "home"; render(); });
 
 // Bound once: the badge sits outside the rendered view, so it survives renders.
-document.querySelector("#language-toggle")?.addEventListener("click", () => {
+document.querySelector("#language-toggle")?.addEventListener("click", (event) => {
   setLanguage(currentLanguage() === "es" ? "en" : "es");
+  const badge = event.currentTarget;
+  badge.classList.remove("flip");
+  void badge.offsetWidth;
+  badge.classList.add("flip");
   render();
 });
 const syncChannel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("the-black-ledger-sync-v1");
@@ -934,9 +1053,11 @@ document.querySelector("#confirm-archive").addEventListener("click", () => {
   const current = ledger();
   const provisional = current.closureBlockers.length > 0;
   document.querySelector("#confirm-dialog").close();
+  pressSeal();
   commit(provisional ? "SESSION_CLOSED_PROVISIONAL" : "SESSION_CLOSED_FINAL", { reason: provisional ? t("msg.organizer.accepted.a.provisional") : t("msg.all.closure.checks.passed") }, provisional ? t("msg.provisional.close.recorded.the") : t("msg.the.journey.was.finally"));
 });
 render();
+igniteAtmosphere();
 const paymentReturn = new URLSearchParams(location.search);
 if (paymentReturn.get("payment") === "return" && paymentReturn.get("token")) {
   const orderId = paymentReturn.get("token");
