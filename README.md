@@ -13,6 +13,10 @@ The Black Ledger records shared expenses as an auditable event history. Its fina
 | ![The chained event history](assets/screenshots/event-history.jpg) | ![The verdict after a completed PayPal settlement](assets/screenshots/verdict-after-capture.jpg) |
 | Every event is stored in order with a chained integrity hash — a history, not a rewrite. | The verdict after a real PayPal Sandbox payment completes: the balance moves, calculated, not asserted. |
 
+![PayPal's own payment confirmation for the same Sandbox checkout](assets/screenshots/paypal-payment-receipt.jpg)
+
+Not a mock, and not just the app's own word for it — PayPal's own confirmation for the same transaction.
+
 ## Run locally
 
 Requires Node.js 22.5 or newer. The server uses Node's built-in SQLite module and needs no package install.
