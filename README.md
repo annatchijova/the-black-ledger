@@ -2,6 +2,17 @@
 
 The Black Ledger records shared expenses as an auditable event history. Its financial engine uses integer minor units, preserves original currencies and exchange-rate evidence, and derives balances from validated events. Narrative signals are designed to observe the ledger without changing balances.
 
+## Screenshots
+
+| | |
+|---|---|
+| ![An unsettled group balance on the session overview](assets/screenshots/home-unsettled-balance.jpg) | ![A member's balance traced back to the event that produced it](assets/screenshots/balance-breakdown.jpg) |
+| A shared trip, recorded. Every participant's balance is derived from the event log, never typed in. | Every number traces back to the event that produced it — no balance exists without a source. |
+| ![A photographed receipt read into a structured proposal](assets/screenshots/receipt-ai-proposal.jpg) | ![A settlement ready to go through PayPal Sandbox checkout](assets/screenshots/paypal-checkout-ready.jpg) |
+| An AI reads a photographed receipt and proposes a structured expense. It is a proposal only — a person still has to confirm it. | Settling a debt goes through PayPal's real Orders v2 API: reserve, create an idempotent order, and only post once PayPal confirms a completed capture. |
+| ![The chained event history](assets/screenshots/event-history.jpg) | ![The verdict after a completed PayPal settlement](assets/screenshots/verdict-after-capture.jpg) |
+| Every event is stored in order with a chained integrity hash — a history, not a rewrite. | The verdict after a real PayPal Sandbox payment completes: the balance moves, calculated, not asserted. |
+
 ## Run locally
 
 Requires Node.js 22.5 or newer. The server uses Node's built-in SQLite module and needs no package install.
